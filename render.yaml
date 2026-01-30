@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: crypto-monitor-bot
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: CHECK_INTERVAL
+        value: 30000
+      - key: PORT
+        value: 10000
+    healthCheckPath: /
+    plan: free
