@@ -1,4 +1,6 @@
 // preload.js
+const { Blob } = require('buffer');
+
 if (globalThis.File === undefined) {
     class File extends Blob {
       constructor(chunks, filename, options = {}) {

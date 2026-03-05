@@ -1,0 +1,182 @@
+{
+  "3e5657e46fa6a3f2a0bcb135934504c6": {
+    "symbol": "NOMUSDT",
+    "title": "노미나(NOM) 거래지원 종료 안내(3/30 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608254673,
+    "orderedAt": null,
+    "latency": null
+  },
+  "ff00ffa586dd3598ae07c11d906cbef8": {
+    "symbol": "DENTUSDT",
+    "title": "덴트(DENT) 거래지원 종료 안내(3/30 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608254726,
+    "orderedAt": null,
+    "latency": null
+  },
+  "f43c09e429cd8984ab17138143c29696": {
+    "symbol": "CFGUSDT",
+    "title": "센트리퓨즈(CFG) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608254778,
+    "orderedAt": null,
+    "latency": null
+  },
+  "59ea02007ae609affc8e2cdc6e582b8e": {
+    "symbol": "ESPUSDT",
+    "title": "에스프레소(ESP) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608254829,
+    "orderedAt": null,
+    "latency": null
+  },
+  "e5702e8c2dd876e260b3db93991b42d8": {
+    "symbol": "SKRUSDT",
+    "title": "시커(SKR) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608254881,
+    "orderedAt": null,
+    "latency": null
+  },
+  "437103edcef2a3a9d484ee1e811a343a": {
+    "symbol": "IOTXUSDT",
+    "title": "아이오텍스(IOTX) 거래 유의 종목 지정 안내",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608254932,
+    "orderedAt": null,
+    "latency": null
+  },
+  "a8a27b93d8c4e8ed8de30d9f6e86acd4": {
+    "symbol": "IOTXUSDT",
+    "title": "아이오텍스(IOTX) 유의 촉구 안내",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608254983,
+    "orderedAt": null,
+    "latency": null
+  },
+  "79f76f0b9eea62cb412dcd29beb866a4": {
+    "symbol": "AZTECUSDT",
+    "title": "아즈텍(AZTEC) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255034,
+    "orderedAt": null,
+    "latency": null
+  },
+  "e7f968fc96205dcc1d0b624b49e1724e": {
+    "symbol": "TAOUSDT",
+    "title": "비트텐서(TAO) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255086,
+    "orderedAt": null,
+    "latency": null
+  },
+  "4785c093a49ee27b9d2d16838910cda2": {
+    "symbol": "LRCUSDT",
+    "title": "루프링(LRC) 거래지원 종료 안내 (3/16 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255138,
+    "orderedAt": null,
+    "latency": null
+  },
+  "4d0f5fec11b27674186d9d17d3f60c7f": {
+    "symbol": "FLOWUSDT",
+    "title": "플로우(FLOW) 거래지원 종료 안내 (3/16 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255189,
+    "orderedAt": null,
+    "latency": null
+  },
+  "2559b8f24749ee60df355404dee9ae6c": {
+    "symbol": "NOMUSDT",
+    "title": "노미나(NOM) 거래 유의 종목 지정 안내",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255240,
+    "orderedAt": null,
+    "latency": null
+  },
+  "cb09ff86b77405b41f1d459ec57eaf11": {
+    "symbol": "OASUSDT",
+    "title": "오아시스(OAS) 거래지원 종료 안내 (3/13 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255291,
+    "orderedAt": null,
+    "latency": null
+  },
+  "21392a79c69df1d7ad5c85e1aaa31c59": {
+    "symbol": "SXPUSDT",
+    "title": "솔라(SXP) 거래지원 종료 안내 (3/13 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255344,
+    "orderedAt": null,
+    "latency": null
+  },
+  "c31379af0ddec1adee8c67a6830a25fa": {
+    "symbol": "DENTUSDT",
+    "title": "덴트(DENT) 거래 유의 종목 지정 안내",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255395,
+    "orderedAt": null,
+    "latency": null
+  },
+  "015d1a8d3c69fe5fe6f4287abdac73ad": {
+    "symbol": "LWAUSDT",
+    "title": "루미웨이브(LWA) 유의 촉구 안내",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255447,
+    "orderedAt": null,
+    "latency": null
+  },
+  "47d25da95e7acbcdaf5bd9ff4224f06b": {
+    "symbol": "BIRBUSDT",
+    "title": "문버드(BIRB) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255499,
+    "orderedAt": null,
+    "latency": null
+  },
+  "380a19c91365a76dec942adf2b001685": {
+    "symbol": "GOUSDT",
+    "title": "고체인(GO) 거래지원 종료 안내 (3/3 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255551,
+    "orderedAt": null,
+    "latency": null
+  },
+  "d8a447bc4ee49432fa36b829de654b2b": {
+    "symbol": "LRCUSDT",
+    "title": "루프링(LRC) 거래 유의 종목 지정 안내",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608255603,
+    "orderedAt": null,
+    "latency": null
+  },
+  "bb55240c85b0ac68b02a6fac743de1f4": {
+    "symbol": "EDGEUSDT",
+    "title": "디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772608526821,
+    "orderedAt": null,
+    "latency": null
+  }
+}

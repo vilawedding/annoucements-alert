@@ -1,12 +1,15 @@
 {
   "name": "crypto-monitor-bot",
   "version": "3.0.0",
-  "description": "Multi-exchange cryptocurrency listing/delisting monitor",
-  "main": "index.js",
+  "description": "Multi-exchange cryptocurrency listing/delisting monitor with lightning-fast trading",
+  "main": "index-new.js",
   "scripts": {
-    "start": "node --require ./preload.js index.js",
-    "dev": "nodemon index.js",
-    "test": "echo \"No tests specified\" && exit 0"
+    "start": "node --require ./preload.js index-new.js",
+    "dev": "nodemon --require ./preload.js index-new.js",
+    "start:legacy": "node --require ./preload.js scripts/legacy/index-monolithic.js",
+    "test": "node scripts/tests/test-integration.js",
+    "test:auto-trade": "node --require ./preload.js scripts/tests/test-auto-trade.js",
+    "example:binance": "node scripts/examples/binance-example.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
