@@ -1,5 +1,6 @@
 const axios = require('axios');
 const crypto = require('crypto');
+const https = require('https');
 const config = require('../../config/config');
 
 /**
@@ -13,12 +14,33 @@ const BASE_URL = config.binanceFutures.useTestnet
 const API_KEY = config.binanceFutures.apiKey;
 const API_SECRET = config.binanceFutures.apiSecret;
 
+// Keep-alive client for lower latency on repeated requests
+const httpClient = axios.create({
+    timeout: 10000,
+    httpsAgent: new https.Agent({
+        keepAlive: true,
+        maxSockets: 50
+    })
+});
+
 // Signature & Request helpers
 function createSignature(queryString) {
     return crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
 }
 
 function buildQueryString(params) {
+    return Object.keys(params)
+        .filter(key => params[key] !== undefined && params[key] !== null)
+        .map(key => {
+            const value = params[key];
+            // Convert objects to JSON string (for takeProfit, stopLoss, etc)
+            const stringValue = typeof value === 'object' ? JSON.stringify(value) : value;
+            return `${key}=${stringValue}`;
+        })
+        .join('&');
+}
+
+function buildQueryStringForUrl(params) {
     return Object.keys(params)
         .filter(key => params[key] !== undefined && params[key] !== null)
         .map(key => {
@@ -36,6 +58,7 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
     
     if (requiresSignature) {
         requestParams.timestamp = timestamp;
+        // Signature must be calculated on non-URL-encoded string
         const queryString = buildQueryString(requestParams);
         requestParams.signature = createSignature(queryString);
     }
@@ -47,13 +70,17 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
             'X-MBX-APIKEY': API_KEY,
             'Content-Type': 'application/x-www-form-urlencoded'
         },
-        timeout: 10000
+        timeout: 10000,
+        paramsSerializer: (params) => {
+            // axios automatically URL-encodes params
+            return buildQueryStringForUrl(params);
+        }
     };
     
     // For Binance API, all parameters (including signature) must be in query string
     config.params = requestParams;
     
-    const response = await axios(config);
+    const response = await httpClient(config);
     return response.data;
 }
 
@@ -116,29 +143,24 @@ const trading = {
             type,
             positionSide = 'BOTH',
             quantity,
-            quoteOrderQty,
             price,
             timeInForce = 'GTC',
             stopPrice,
             reduceOnly,
             closePosition,
             newClientOrderId,
-            takeProfit,
-            stopLoss
+            newOrderRespType
         } = orderParams;
         
         const params = { symbol, side, type, positionSide };
         
-        // Use quoteOrderQty (USDT amount) if provided, otherwise use quantity (token amount)
-        if (quoteOrderQty !== undefined) {
-            params.quoteOrderQty = quoteOrderQty;
-        } else if (quantity !== undefined) {
+        // Use quantity
+        if (quantity !== undefined) {
             params.quantity = quantity;
         }
-        // Don't add quantity/quoteOrderQty if using closePosition
+        // Don't add quantity if using closePosition
         if (closePosition !== undefined && closePosition === true) {
             delete params.quantity;
-            delete params.quoteOrderQty;
         }
         
         // timeInForce is only for LIMIT orders, not MARKET or STOP orders
@@ -149,36 +171,99 @@ const trading = {
         if (reduceOnly !== undefined) params.reduceOnly = reduceOnly;
         if (closePosition !== undefined) params.closePosition = closePosition;
         if (newClientOrderId !== undefined) params.newClientOrderId = newClientOrderId;
-        
-        // Add takeProfit and stopLoss with ROI% (callbackRate)
-        if (takeProfit !== undefined) params.takeProfit = takeProfit;
-        if (stopLoss !== undefined) params.stopLoss = stopLoss;
+        if (newOrderRespType !== undefined) params.newOrderRespType = newOrderRespType;
         
         return await makeRequest('POST', '/fapi/v1/order', params, true);
     },
     
-    async marketBuy(symbol, quantityOrAmount, positionSide = 'BOTH', useUSDT = true, takeProfit = null, stopLoss = null) {
-        const orderParams = {
+    async marketBuy(symbol, quantity, positionSide = 'BOTH') {
+        return await this.placeOrder({
             symbol,
             side: 'BUY',
             type: 'MARKET',
-            positionSide
+            positionSide,
+            quantity,
+            newOrderRespType: 'RESULT'
+        });
+    },
+    
+    /**
+     * Market Buy with Take Profit and Stop Loss
+     * Handles the complete flow: BUY → get entry price → place TP/SL
+     */
+    async marketBuyWithTPSL(symbol, usdtAmount, tpPercent, slPercent, positionSide = 'BOTH', precision = null) {
+        // Get precision if not provided
+        if (!precision) {
+            precision = await utils.getSymbolPrecision(symbol);
+        }
+        
+        // Get current price to calculate quantity from USDT amount
+        const priceData = await marketData.getPrice(symbol);
+        const currentPrice = parseFloat(priceData.price);
+        
+        if (currentPrice <= 0) throw new Error('Invalid price');
+        
+        // Calculate quantity from USDT amount
+        const quantity = utils.formatQuantity(
+            usdtAmount / currentPrice,
+            precision.quantityPrecision
+        );
+        
+        // Place BUY order
+        const order = await this.marketBuy(symbol, quantity, positionSide);
+        let entryPrice = parseFloat(order.avgPrice);
+
+        // Fallback: fetch entry price from current position when avgPrice is missing
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+            try {
+                const positions = await account.getPositionInfo(symbol);
+                const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
+                const positionEntryPrice = position ? parseFloat(position.entryPrice) : NaN;
+                if (Number.isFinite(positionEntryPrice) && positionEntryPrice > 0) {
+                    entryPrice = positionEntryPrice;
+                }
+            } catch (_) {
+                // keep fallback below
+            }
+        }
+
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+            entryPrice = currentPrice;
+        }
+        
+        // Calculate TP and SL prices
+        const takeProfitPrice = entryPrice * (1 + tpPercent / 100);
+        const stopLossPrice = entryPrice * (1 - slPercent / 100);
+        
+        // Place TP and SL orders (wait for confirmation)
+        const [tpOrder, slOrder] = await Promise.all([
+            this.placeOrder({
+                symbol,
+                side: 'SELL',
+                type: 'TAKE_PROFIT_MARKET',
+                positionSide,
+                stopPrice: utils.formatPrice(takeProfitPrice, precision.pricePrecision),
+                closePosition: true
+            }),
+            this.placeOrder({
+                symbol,
+                side: 'SELL',
+                type: 'STOP_MARKET',
+                positionSide,
+                stopPrice: utils.formatPrice(stopLossPrice, precision.pricePrecision),
+                closePosition: true
+            })
+        ]);
+        
+        return {
+            ...order,
+            quantity,
+            entryPrice,
+            takeProfitOrderId: tpOrder?.orderId,
+            stopLossOrderId: slOrder?.orderId,
+            takeProfitPrice: takeProfitPrice.toFixed(precision.pricePrecision),
+            stopLossPrice: stopLossPrice.toFixed(precision.pricePrecision)
         };
-        
-        if (useUSDT) {
-            orderParams.quoteOrderQty = quantityOrAmount;
-        } else {
-            orderParams.quantity = quantityOrAmount;
-        }
-        
-        if (takeProfit !== null) {
-            orderParams.takeProfit = takeProfit;
-        }
-        if (stopLoss !== null) {
-            orderParams.stopLoss = stopLoss;
-        }
-        
-        return await this.placeOrder(orderParams);
     },
     
     async marketSell(symbol, quantity, positionSide = 'BOTH') {
