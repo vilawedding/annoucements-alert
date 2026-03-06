@@ -195,12 +195,57 @@ const trading = {
             newOrderRespType: 'RESULT'
         });
     },
+
+    /**
+     * Place Algo Order (for symbols that require it)
+     * Used when regular /fapi/v1/order returns -4120 error
+     * Endpoint: POST /fapi/v1/algoOrder (NOTE: different from /fapi/v1/algo/order)
+     */
+    async placeAlgoOrder(orderParams) {
+        const {
+            symbol,
+            side,
+            type,
+            positionSide = 'BOTH',
+            quantity,
+            stopPrice,
+            reduceOnly,
+            workingType,
+            closePosition,
+            priceProtect,
+            clientAlgoId,
+            timeInForce = 'GTC'
+        } = orderParams;
+
+        // Algo Order requires algoType='CONDITIONAL' and uses triggerPrice instead of stopPrice
+        const params = {
+            algoType: 'CONDITIONAL',
+            symbol,
+            side,
+            type,
+            positionSide,
+            timeInForce
+        };
+
+        if (quantity !== undefined) params.quantity = quantity;
+        if (stopPrice !== undefined) params.triggerPrice = stopPrice;  // Map stopPrice to triggerPrice
+        if (reduceOnly !== undefined) params.reduceOnly = reduceOnly ? 'true' : 'false';
+        if (closePosition !== undefined) params.closePosition = closePosition ? 'true' : 'false';
+        if (workingType !== undefined) params.workingType = workingType;
+        if (priceProtect !== undefined) params.priceProtect = priceProtect ? 'TRUE' : 'FALSE';
+        if (clientAlgoId !== undefined) params.clientAlgoId = clientAlgoId;
+
+        return await makeRequest('POST', '/fapi/v1/algoOrder', params, true);
+    },
     
     /**
      * Market Buy with Take Profit and Stop Loss
-     * Handles the complete flow: BUY → get entry price → place TP/SL with robust validation
+     * Handles the complete flow: BUY → place SL → place TP with algo endpoint fallback
+     * For newly listed symbols that require Algo Order API, automatically detects and switches
      */
-    async marketBuyWithTPSL(symbol, usdtAmount, tpPercent, slPercent, positionSide = 'BOTH', precision = null) {
+    async marketBuyWithTPSL(symbol, usdtAmount, tpPercent, slPercent, positionSide = 'BOTH', precision = null, options = {}) {
+        const { delayMs = 0 } = options;
+
         if (!precision) {
             precision = await utils.getSymbolPrecision(symbol);
         }
@@ -256,54 +301,91 @@ const trading = {
             throw new Error(`TAKE_PROFIT_MARKET invalid. takeProfitPrice <= markPrice`);
         }
         
-        // Place TP and SL orders separately to avoid cascade failures
-        let tpOrder = null;
+        // Small delay for position to sync on exchange (important for newly listed symbols)
+        if (delayMs > 0) {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        // Place SL first (more critical), then TP
         let slOrder = null;
+        let tpOrder = null;
+        
+        // ===== PLACE STOP LOSS (SL is more critical) =====
+        const slParams = {
+            symbol,
+            side: 'SELL',
+            type: 'STOP_MARKET',
+            positionSide,
+            stopPrice: stopLossPrice,
+            quantity,
+            workingType: 'MARK_PRICE',
+            reduceOnly: true
+        };
         
         try {
-            tpOrder = await this.placeOrder({
-                symbol,
-                side: 'SELL',
-                type: 'TAKE_PROFIT',
-                positionSide,
-                stopPrice: takeProfitPrice,
-                price: takeProfitPrice,
-                quantity,
-                workingType: 'MARK_PRICE',
-                reduceOnly: true,
-                timeInForce: 'GTC'
-            });
+            slOrder = await this.placeOrder(slParams);
+            console.log(`[SL PLACED] ${symbol} @ ${stopLossPrice}`);
         } catch (e) {
-            console.error(`[TP FAILED] ${symbol}`, e.response?.data || e.message);
+            // Check if error is -4120 (order type not supported for endpoint)
+            if (e.response?.data?.code === -4120) {
+                console.warn(`[SL ALGO FALLBACK] ${symbol} - using /fapi/v1/algoOrder`);
+                try {
+                    slOrder = await this.placeAlgoOrder(slParams);
+                    console.log(`[SL ALGO PLACED] ${symbol} @ ${stopLossPrice}`);
+                } catch (algoErr) {
+                    console.error(`[SL ALGO FAILED] ${symbol}`, algoErr.response?.data || algoErr.message);
+                }
+            } else {
+                console.error(`[SL FAILED] ${symbol}`, e.response?.data || e.message);
+            }
         }
+        
+        // ===== PLACE TAKE PROFIT (only if SL succeeded) =====
+        const tpParams = {
+            symbol,
+            side: 'SELL',
+            type: 'TAKE_PROFIT_MARKET',
+            positionSide,
+            stopPrice: takeProfitPrice,
+            quantity,
+            workingType: 'MARK_PRICE',
+            reduceOnly: true
+        };
         
         try {
-            slOrder = await this.placeOrder({
-                symbol,
-                side: 'SELL',
-                type: 'STOP',
-                positionSide,
-                stopPrice: stopLossPrice,
-                 price: stopLossPrice,
-                quantity,
-                workingType: 'MARK_PRICE',
-                reduceOnly: true,
-                timeInForce: 'GTC'
-            });
+            tpOrder = await this.placeOrder(tpParams);
+            console.log(`[TP PLACED] ${symbol} @ ${takeProfitPrice}`);
         } catch (e) {
-            console.error(`[SL FAILED] ${symbol}`, e.response?.data || e.message);
+            // Check if error is -4120 (order type not supported for endpoint)
+            if (e.response?.data?.code === -4120) {
+                console.warn(`[TP ALGO FALLBACK] ${symbol} - using /fapi/v1/algoOrder`);
+                try {
+                    tpOrder = await this.placeAlgoOrder(tpParams);
+                    console.log(`[TP ALGO PLACED] ${symbol} @ ${takeProfitPrice}`);
+                } catch (algoErr) {
+                    console.error(`[TP ALGO FAILED] ${symbol}`, algoErr.response?.data || algoErr.message);
+                }
+            } else {
+                console.error(`[TP FAILED] ${symbol}`, e.response?.data || e.message);
+            }
         }
         
-        if (!tpOrder && !slOrder) {
+        // Fail if both SL and TP failed (position unprotected)
+        if (!slOrder && !tpOrder) {
             throw new Error('Both TP and SL orders failed - position has no protection');
+        }
+        
+        // Warn if only TP failed (SL still protects)
+        if (!tpOrder) {
+            console.warn(`[WARNING] TP failed but SL is active for ${symbol}`);
         }
         
         return {
             ...order,
             quantity,
             entryPrice,
-            takeProfitOrderId: tpOrder?.orderId,
-            stopLossOrderId: slOrder?.orderId,
+            takeProfitOrderId: tpOrder?.orderId ?? tpOrder?.algoId,
+            stopLossOrderId: slOrder?.orderId ?? slOrder?.algoId,
             takeProfitPrice,
             stopLossPrice
         };
@@ -477,6 +559,7 @@ module.exports = {
     changeInitialLeverage: account.changeInitialLeverage,
     changeMarginType: account.changeMarginType,
     placeOrder: trading.placeOrder.bind(trading),
+    placeAlgoOrder: trading.placeAlgoOrder.bind(trading),
     marketBuy: trading.marketBuy.bind(trading),
     marketSell: trading.marketSell.bind(trading),
     limitBuy: trading.limitBuy.bind(trading),
