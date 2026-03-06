@@ -62,7 +62,30 @@ class LightningAutoTrader {
     /**
      * Execute trade with maximum speed
      */
-    async executeLight(announcement) {
+    async executeLight(announcement1) {
+        const announcement = {
+  hash: 'bb55240c85b0ac68b02a6fac743de1f4',
+  exchange: 'UPBIT',
+  category: 'LISTING',
+  title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
+  url: 'https://upbit.com/notice',
+  symbol: 'PIEVERSEUSDT',
+  releaseDate: 1772603400000,
+  tokens: [ 'PIEVERSE' ],
+  formattedDate: '3/4/2026, 14:50:00 (KST)',
+  metadata: {
+    symbol: 'PIEVERSEUSDT',
+    title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
+    link: 'https://upbit.com/notice',
+    exchange: 'UPBIT',
+    detectedAt: 1772765541466,
+    orderedAt: null,
+    latency: null
+  },
+  detectedAt: 1772765541466,
+  _shouldTrade: true
+}
+
         if (!this.config.enabled) return null;
         if (announcement.exchange !== 'UPBIT' || announcement.category !== 'LISTING') return null;
         if (!this.config.upbitListing) return null;
@@ -82,34 +105,43 @@ class LightningAutoTrader {
             try {
                 console.log(`🚀 [TRADE] ${symbol}`);
                 
-                // Parallel operations for speed
-                const [priceData, precision] = await Promise.all([
-                    this.binance.getPrice(symbol).catch(() => null),
-                    fastCache.getSymbolPrecision(symbol, this.binance)
-                ]).catch(error => {
+                // Get precision for formatting prices (SL/TP)
+                const precision = await fastCache.getSymbolPrecision(symbol, this.binance).catch(error => {
                     console.log(`⚠️ ${symbol} unavailable`);
                     throw error;
                 });
                 
-                if (!priceData || !precision) {
-                    throw new Error('No price data');
+                if (!precision) {
+                    throw new Error('No precision data');
                 }
-                
-                const currentPrice = parseFloat(priceData.price);
-                if (currentPrice <= 0) throw new Error('Invalid price');
-                
-                // Fast quantity calculation
-                const quantity = this.binance.formatQuantity(
-                    this.config.amount / currentPrice,
-                    precision.quantityPrecision
-                );
                 
                 // Set leverage (fast - non-blocking)
                 this.binance.changeInitialLeverage(symbol, this.config.leverage).catch(() => {});
                 
-                // Place order immediately (most critical step)
-                const order = await this.binance.marketBuy(symbol, quantity);
+                // Place order by USDT amount with TP/SL using ROI%
+                const usdtAmount = this.config.amount;
+                const order = await this.binance.marketBuy(
+                    symbol, 
+                    usdtAmount, 
+                    'BOTH', 
+                    true,
+                    // takeProfit with callbackRate (ROI%)
+                    {
+                        type: 'MARKET',
+                        stopPrice: undefined,
+                        callbackRate: this.config.takeProfitPercent
+                    },
+                    // stopLoss with callbackRate (ROI%)
+                    {
+                        type: 'MARKET',
+                        stopPrice: undefined,
+                        callbackRate: this.config.stopLossPercent
+                    }
+                );
                 const tradeDuration = Date.now() - tradeStartTime;
+                
+                const entryPrice = parseFloat(order.avgPrice);
+                const executedQty = parseFloat(order.executedQty);
                 
                 const result = {
                     token,
@@ -120,11 +152,15 @@ class LightningAutoTrader {
                     executedQty: order.executedQty,
                     duration: tradeDuration,
                     leverage: this.config.leverage,
-                    amount: this.config.amount
+                    amount: this.config.amount,
+                    stopLoss: `-${this.config.stopLossPercent}%`,
+                    takeProfit: `+${this.config.takeProfitPercent}%`
                 };
                 
                 tradeResults.push(result);
                 console.log(`✅ [TRADE] ${symbol} in ${tradeDuration}ms`);
+                console.log(`   📉 SL: ${result.stopLoss}`);
+                console.log(`   📈 TP: ${result.takeProfit}`);
                 
                 // Record order execution in storage with millisecond precision
                 if (announcementHash) {
@@ -135,12 +171,13 @@ class LightningAutoTrader {
                 }
                 
                 // Send notification asynchronously (non-blocking)
-                const tradeMessage = telegram.createTradeMessage(result);
-                this.queueTelegramMessage(tradeMessage);
+                // const tradeMessage = telegram.createTradeMessage(result);
+                // this.queueTelegramMessage(tradeMessage);
                 
                 // No delay between trades - send immediately
                 
             } catch (error) {
+                console.log(error)
                 const tradeDuration = Date.now() - tradeStartTime;
                 
                 const result = {
