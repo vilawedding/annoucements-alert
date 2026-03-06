@@ -166,16 +166,16 @@
     "title": "디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
     "link": "https://upbit.com/notice",
     "exchange": "UPBIT",
-    "detectedAt": 1772785707789,
-    "orderedAt": 1772785707842,
-    "latency": 53
+    "detectedAt": 1772787595466,
+    "orderedAt": 1772787595517,
+    "latency": 51
   },
   "d8a447bc4ee49432fa36b829de654b2b": {
     "symbol": "LRCUSDT",
     "title": "루프링(LRC) 거래 유의 종목 지정 안내",
     "link": "https://upbit.com/notice",
     "exchange": "UPBIT",
-    "detectedAt": 1772785707790,
+    "detectedAt": 1772787595466,
     "orderedAt": null,
     "latency": null
   }

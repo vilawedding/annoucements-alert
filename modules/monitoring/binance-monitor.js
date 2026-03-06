@@ -3,7 +3,6 @@ const crypto = require('crypto');
 const cheerio = require('cheerio');
 const config = require('../../config/config');
 const storage = require('../storage');
-const telegram = require('../notifications');
 
 /**
  * Binance Announcements Monitor
@@ -14,18 +13,25 @@ class BinanceMonitor {
         this.config = config.exchanges.binance;
         this.catalogIds = this.config.catalogIds;
         this.catalogNames = this.config.catalogNames;
+        this.blacklist = new Set(['USDT', 'FDUSD', 'TUSD', 'USD', 'BTC', 'ETH', 'BNB']);
     }
     
     async fetchAnnouncements(catalogId) {
         try {
-            const url = `https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query?type=1&pageNo=1&pageSize=10&catalogId=${catalogId}`;
-            
+            const url = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query';
+
             const response = await axios.get(url, {
+                params: {
+                    type: 1,
+                    pageNo: 1,
+                    pageSize: 20,
+                    catalogId
+                },
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Accept': 'application/json'
                 },
-                timeout: 10000
+                timeout: 5000
             });
             
             if (response.data.success && response.data.data?.catalogs?.length > 0) {
@@ -33,7 +39,10 @@ class BinanceMonitor {
                 return {
                     name: catalog.catalogName,
                     articles: catalog.articles.map(article => ({
-                        ...article,
+                        id: article.id,
+                        code: article.code,
+                        title: article.title,
+                        releaseDate: article.releaseDate,
                         catalogId: catalogId,
                         exchange: 'BINANCE',
                         url: `https://www.binance.com/en/support/announcement/${article.code}`
@@ -110,6 +119,25 @@ class BinanceMonitor {
         
         return Array.from(tokens);
     }
+
+    filterValidTokens(tokens) {
+        return Array.from(new Set(tokens))
+            .map(t => String(t || '').toUpperCase().trim())
+            .filter(t => t.length >= 2 && t.length <= 10)
+            .filter(t => !this.blacklist.has(t));
+    }
+
+    generateSignals(tokens, category) {
+        const side = category === 'DELISTING' ? 'SELL' : 'BUY';
+        const signalType = category === 'DELISTING' ? 'DELISTING_SIGNAL' : 'LISTING_SIGNAL';
+
+        return tokens.map(token => ({
+            token,
+            symbol: `${token}USDT`,
+            side,
+            type: signalType
+        }));
+    }
     
     categorize(title, catalogId) {
         const lowerTitle = title.toLowerCase();
@@ -144,13 +172,22 @@ class BinanceMonitor {
         }
         
         const category = this.categorize(title, catalogId);
+        if (!['LISTING', 'NEW_PAIRS', 'DELISTING'].includes(category)) {
+            return null;
+        }
+
         const tokens = this.extractTokens(title);
         
-        if (category === 'DELISTING' && (tokens.length === 0 || title.toLowerCase().includes('multiple'))) {
+        if (category === 'DELISTING' && tokens.length === 0 && /(delist|removal)/i.test(title)) {
             const detailedTokens = await this.parseDelistDetails(code);
             if (detailedTokens.length > 0) {
                 tokens.push(...detailedTokens);
             }
+        }
+
+        const validTokens = this.filterValidTokens(tokens);
+        if (validTokens.length === 0) {
+            return null;
         }
         
         const formattedDate = new Date(releaseDate).toLocaleString('vi-VN', {
@@ -160,8 +197,9 @@ class BinanceMonitor {
         
         // Prepare metadata for storage with millisecond precision
         const detectionTime = Date.now();
-        const primaryToken = tokens.length > 0 ? tokens[0] : null;
+        const primaryToken = validTokens.length > 0 ? validTokens[0] : null;
         const symbol = primaryToken ? `${primaryToken}USDT` : null;
+        const signals = this.generateSignals(validTokens, category);
         
         const metadata = {
             symbol,
@@ -182,7 +220,8 @@ class BinanceMonitor {
             url,
             symbol,
             releaseDate,
-            tokens: Array.from(new Set(tokens)),
+            tokens: validTokens,
+            signals,
             formattedDate,
             metadata,
             detectedAt: detectionTime

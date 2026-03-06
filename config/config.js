@@ -42,7 +42,15 @@ module.exports = {
         amount: parseFloat(process.env.AUTO_TRADE_AMOUNT) || 10,
         leverage: parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5,
         stopLossPercent: parseFloat(process.env.AUTO_TRADE_SL_PERCENT) || 1.0,
-        takeProfitPercent: parseFloat(process.env.AUTO_TRADE_TP_PERCENT) || 200.0
+        takeProfitPercent: parseFloat(process.env.AUTO_TRADE_TP_PERCENT) || 200.0,
+        takeProfitPercentUpbit:
+            parseFloat(process.env.AUTO_TRADE_TP_PERCENT_UPBIT) ||
+            parseFloat(process.env.AUTO_TRADE_TP_PERCENT) ||
+            200.0,
+        takeProfitPercentBinance:
+            parseFloat(process.env.AUTO_TRADE_TP_PERCENT_BINANCE) ||
+            parseFloat(process.env.AUTO_TRADE_TP_PERCENT) ||
+            200.0
     },
     
     // Binance Futures API Configuration

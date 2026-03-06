@@ -99,7 +99,30 @@ class LightningAutoTrader {
     /**
      * Execute trade with maximum speed
      */
-        async executeLight(announcement) {
+        async executeLight(announcement1) {
+
+             const announcement = {
+  hash: 'bb55240c85b0ac68b02a6fac743de1f4',
+  exchange: 'UPBIT',
+  category: 'LISTING',
+  title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
+  url: 'https://upbit.com/notice',
+  symbol: 'DOTUSDT',
+  releaseDate: 1772603400000,
+  tokens: [ 'DOT' ],
+  formattedDate: '3/4/2026, 14:50:00 (KST)',
+  metadata: {
+    symbol: 'DOTUSDT',
+    title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
+    link: 'https://upbit.com/notice',
+    exchange: 'UPBIT',
+    detectedAt: 1772765541466,
+    orderedAt: null,
+    latency: null
+  },
+  detectedAt: 1772765541466,
+  _shouldTrade: true
+}
 
         if (!this.config.enabled) return null;
         if (announcement.exchange !== 'UPBIT' || announcement.category !== 'LISTING') return null;
@@ -109,6 +132,11 @@ class LightningAutoTrader {
             ? announcement.tokens
             : this.extractTokensFast(announcement.title || '');
         if (tokens.length === 0) return null;
+
+        const exchange = String(announcement.exchange || '').toUpperCase();
+        const takeProfitPercent = exchange === 'BINANCE'
+            ? this.config.takeProfitPercentBinance
+            : this.config.takeProfitPercentUpbit;
         
         const executionStartTime = Date.now();
         const tradeResults = [];
@@ -141,7 +169,7 @@ class LightningAutoTrader {
                     () => this.binance.trading.marketBuyWithTPSL(
                         symbol,
                         this.config.amount,
-                        this.config.takeProfitPercent,
+                        takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
                         precision
