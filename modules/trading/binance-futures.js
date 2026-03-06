@@ -53,11 +53,12 @@ function buildQueryStringForUrl(params) {
 }
 
 async function makeRequest(method, endpoint, params = {}, requiresSignature = false) {
-    const timestamp = Date.now();
     const requestParams = { ...params };
     
     if (requiresSignature) {
-        requestParams.timestamp = timestamp;
+        // Use server time instead of local time to avoid timestamp drift
+        const serverTime = await marketData.getServerTime().catch(() => Date.now());
+        requestParams.timestamp = serverTime;
         // Signature must be calculated on non-URL-encoded string
         const queryString = buildQueryString(requestParams);
         requestParams.signature = createSignature(queryString);
@@ -71,17 +72,20 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
             'Content-Type': 'application/x-www-form-urlencoded'
         },
         timeout: 10000,
-        paramsSerializer: (params) => {
-            // axios automatically URL-encodes params
-            return buildQueryStringForUrl(params);
-        }
+        paramsSerializer: (params) => buildQueryStringForUrl(params)
     };
     
     // For Binance API, all parameters (including signature) must be in query string
     config.params = requestParams;
     
-    const response = await httpClient(config);
-    return response.data;
+    try {
+        const response = await httpClient(config);
+        return response.data;
+    } catch (err) {
+        const errorData = err.response?.data || err.message;
+        console.error(`[BINANCE ERROR] ${method} ${endpoint}`, JSON.stringify(errorData, null, 2));
+        throw err;
+    }
 }
 
 // Market Data APIs
@@ -194,31 +198,28 @@ const trading = {
     
     /**
      * Market Buy with Take Profit and Stop Loss
-     * Handles the complete flow: BUY → get entry price → place TP/SL
+     * Handles the complete flow: BUY → get entry price → place TP/SL with robust validation
      */
     async marketBuyWithTPSL(symbol, usdtAmount, tpPercent, slPercent, positionSide = 'BOTH', precision = null) {
-        // Get precision if not provided
         if (!precision) {
             precision = await utils.getSymbolPrecision(symbol);
         }
         
-        // Get current price to calculate quantity from USDT amount
         const priceData = await marketData.getPrice(symbol);
         const currentPrice = parseFloat(priceData.price);
         
         if (currentPrice <= 0) throw new Error('Invalid price');
         
-        // Calculate quantity from USDT amount
+        // Calculate and format quantity using stepSize
         const quantity = utils.formatQuantity(
             usdtAmount / currentPrice,
-            precision.quantityPrecision
+            precision.stepSize || precision.quantityPrecision
         );
         
         // Place BUY order
         const order = await this.marketBuy(symbol, quantity, positionSide);
         let entryPrice = parseFloat(order.avgPrice);
 
-        // Fallback: fetch entry price from current position when avgPrice is missing
         if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
             try {
                 const positions = await account.getPositionInfo(symbol);
@@ -227,9 +228,7 @@ const trading = {
                 if (Number.isFinite(positionEntryPrice) && positionEntryPrice > 0) {
                     entryPrice = positionEntryPrice;
                 }
-            } catch (_) {
-                // keep fallback below
-            }
+            } catch (_) {}
         }
 
         if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
@@ -237,32 +236,67 @@ const trading = {
         }
         
         // Calculate TP and SL prices
-        const takeProfitPrice = entryPrice * (1 + tpPercent / 100);
-        const stopLossPrice = entryPrice * (1 - slPercent / 100);
+        let takeProfitPrice = entryPrice * (1 + tpPercent / 100);
+        let stopLossPrice = entryPrice * (1 - slPercent / 100);
         
-        // Place TP and SL orders (wait for confirmation)
-        const [tpOrder, slOrder] = await Promise.all([
-            this.placeOrder({
+        // Format prices using tickSize
+        takeProfitPrice = utils.formatPrice(takeProfitPrice, precision.tickSize || precision.pricePrecision);
+        stopLossPrice = utils.formatPrice(stopLossPrice, precision.tickSize || precision.pricePrecision);
+        
+        // Validate STOP/TAKE_PROFIT direction before placing orders
+        const markPrice = currentPrice;
+        
+        if (stopLossPrice >= markPrice) {
+            console.error(`[VALIDATION] STOP_MARKET direction invalid: stopLossPrice (${stopLossPrice}) >= markPrice (${markPrice})`);
+            throw new Error(`STOP_MARKET invalid. stopLossPrice >= markPrice`);
+        }
+        
+        if (takeProfitPrice <= markPrice) {
+            console.error(`[VALIDATION] TAKE_PROFIT_MARKET direction invalid: takeProfitPrice (${takeProfitPrice}) <= markPrice (${markPrice})`);
+            throw new Error(`TAKE_PROFIT_MARKET invalid. takeProfitPrice <= markPrice`);
+        }
+        
+        // Place TP and SL orders separately to avoid cascade failures
+        let tpOrder = null;
+        let slOrder = null;
+        
+        try {
+            tpOrder = await this.placeOrder({
                 symbol,
                 side: 'SELL',
-                type: 'TAKE_PROFIT_MARKET',
+                type: 'TAKE_PROFIT',
                 positionSide,
-                stopPrice: utils.formatPrice(takeProfitPrice, precision.pricePrecision),
-                quantity: quantity,
+                stopPrice: takeProfitPrice,
+                price: takeProfitPrice,
+                quantity,
                 workingType: 'MARK_PRICE',
-                reduceOnly: true
-            }),
-            this.placeOrder({
+                reduceOnly: true,
+                timeInForce: 'GTC'
+            });
+        } catch (e) {
+            console.error(`[TP FAILED] ${symbol}`, e.response?.data || e.message);
+        }
+        
+        try {
+            slOrder = await this.placeOrder({
                 symbol,
                 side: 'SELL',
-                type: 'STOP_MARKET',
+                type: 'STOP',
                 positionSide,
-                stopPrice: utils.formatPrice(stopLossPrice, precision.pricePrecision),
-                quantity: quantity,
+                stopPrice: stopLossPrice,
+                 price: stopLossPrice,
+                quantity,
                 workingType: 'MARK_PRICE',
-                reduceOnly: true
-            })
-        ]);
+                reduceOnly: true,
+                timeInForce: 'GTC'
+            });
+        } catch (e) {
+            console.error(`[SL FAILED] ${symbol}`, e.response?.data || e.message);
+        }
+        
+        if (!tpOrder && !slOrder) {
+            throw new Error('Both TP and SL orders failed - position has no protection');
+        }
         
         return {
             ...order,
@@ -270,8 +304,8 @@ const trading = {
             entryPrice,
             takeProfitOrderId: tpOrder?.orderId,
             stopLossOrderId: slOrder?.orderId,
-            takeProfitPrice: takeProfitPrice.toFixed(precision.pricePrecision),
-            stopLossPrice: stopLossPrice.toFixed(precision.pricePrecision)
+            takeProfitPrice,
+            stopLossPrice
         };
     },
     
@@ -393,21 +427,33 @@ const utils = {
             throw new Error(`Symbol ${symbol} not found`);
         }
         
+        // Extract filter values for proper formatting
+        const lotSize = symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE');
+        const priceFilter = symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER');
+        
         return {
             pricePrecision: symbolInfo.pricePrecision,
             quantityPrecision: symbolInfo.quantityPrecision,
             baseAssetPrecision: symbolInfo.baseAssetPrecision,
             quotePrecision: symbolInfo.quotePrecision,
+            stepSize: lotSize ? parseFloat(lotSize.stepSize) : null,
+            tickSize: priceFilter ? parseFloat(priceFilter.tickSize) : null,
             filters: symbolInfo.filters
         };
     },
     
-    formatQuantity(quantity, precision) {
-        return parseFloat(quantity.toFixed(precision));
+    formatQuantity(quantity, stepSize) {
+        if (!stepSize || stepSize <= 0) return parseFloat(quantity.toFixed(8));
+        const precision = Math.log10(1 / stepSize);
+        const adjusted = Math.floor(quantity / stepSize) * stepSize;
+        return parseFloat(adjusted.toFixed(precision));
     },
     
-    formatPrice(price, precision) {
-        return parseFloat(price.toFixed(precision));
+    formatPrice(price, tickSize) {
+        if (!tickSize || tickSize <= 0) return parseFloat(price.toFixed(8));
+        const precision = Math.log10(1 / tickSize);
+        const adjusted = Math.floor(price / tickSize) * tickSize;
+        return parseFloat(adjusted.toFixed(precision));
     }
 };
 
