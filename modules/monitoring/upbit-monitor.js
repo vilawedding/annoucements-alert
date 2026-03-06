@@ -191,9 +191,9 @@ class UpbitMonitor {
             }
             
             const totalDuration = Date.now() - fetchStart;
-            if (processed > 0 || totalDuration > 500) {
-                console.log(`   ⏱️ Total Upbit: ${totalDuration}ms (Fetch: ${fetchDuration}ms)`);
-            }
+            // if (processed > 0 || totalDuration > 500) {
+            //     console.log(`   ⏱️ Total Upbit: ${totalDuration}ms (Fetch: ${fetchDuration}ms)`);
+            // }
         } catch (error) {
             const totalDuration = Date.now() - fetchStart;
             console.error(`❌ Upbit error (${totalDuration}ms):`, error.message);

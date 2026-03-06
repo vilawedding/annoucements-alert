@@ -149,7 +149,8 @@ const trading = {
             reduceOnly,
             closePosition,
             newClientOrderId,
-            newOrderRespType
+            newOrderRespType,
+            workingType
         } = orderParams;
         
         const params = { symbol, side, type, positionSide };
@@ -164,14 +165,18 @@ const trading = {
         }
         
         // timeInForce is only for LIMIT orders, not MARKET or STOP orders
-        if (type === 'LIMIT' && timeInForce !== undefined) params.timeInForce = timeInForce;
+        // LIMIT, STOP, TAKE_PROFIT orders support timeInForce (defaults to GTC)
+        if (['LIMIT', 'STOP', 'TAKE_PROFIT'].includes(type) && timeInForce !== undefined) {
+            params.timeInForce = timeInForce;
+        }
         
         if (price !== undefined) params.price = price;
         if (stopPrice !== undefined) params.stopPrice = stopPrice;
-        if (reduceOnly !== undefined) params.reduceOnly = reduceOnly;
-        if (closePosition !== undefined) params.closePosition = closePosition;
+        if (reduceOnly !== undefined) params.reduceOnly = reduceOnly ? 'true' : 'false';
+        if (closePosition !== undefined) params.closePosition = closePosition ? 'true' : 'false';
         if (newClientOrderId !== undefined) params.newClientOrderId = newClientOrderId;
         if (newOrderRespType !== undefined) params.newOrderRespType = newOrderRespType;
+        if (workingType !== undefined) params.workingType = workingType;
         
         return await makeRequest('POST', '/fapi/v1/order', params, true);
     },
@@ -243,7 +248,9 @@ const trading = {
                 type: 'TAKE_PROFIT_MARKET',
                 positionSide,
                 stopPrice: utils.formatPrice(takeProfitPrice, precision.pricePrecision),
-                closePosition: true
+                quantity: quantity,
+                workingType: 'MARK_PRICE',
+                reduceOnly: true
             }),
             this.placeOrder({
                 symbol,
@@ -251,7 +258,9 @@ const trading = {
                 type: 'STOP_MARKET',
                 positionSide,
                 stopPrice: utils.formatPrice(stopLossPrice, precision.pricePrecision),
-                closePosition: true
+                quantity: quantity,
+                workingType: 'MARK_PRICE',
+                reduceOnly: true
             })
         ]);
         
@@ -321,9 +330,19 @@ const trading = {
     
     /**
      * Place Stop Loss Order (STOP_MARKET)
-     * Automatically closes position when price hits stop price
+     * Closes position at market price when stop price is hit
      */
-    async stopLoss(symbol, quantity, stopPrice, positionSide = 'BOTH') {
+    async stopLoss(symbol, stopPrice, positionSide = 'BOTH') {
+        // Get current position to determine quantity
+        const positions = await account.getPositionInfo(symbol);
+        const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
+        
+        if (!position || parseFloat(position.positionAmt) === 0) {
+            throw new Error(`No open position for ${symbol} ${positionSide}`);
+        }
+        
+        const quantity = Math.abs(parseFloat(position.positionAmt));
+        
         return await this.placeOrder({
             symbol,
             side: 'SELL',
@@ -331,15 +350,26 @@ const trading = {
             positionSide,
             stopPrice,
             quantity,
-            closePosition: true
+            workingType: 'MARK_PRICE',
+            reduceOnly: true
         });
     },
     
     /**
      * Place Take Profit Order (TAKE_PROFIT_MARKET)
-     * Automatically closes position when price hits take profit price
+     * Closes position at market price when take profit price is hit
      */
-    async takeProfit(symbol, quantity, takeProfitPrice, positionSide = 'BOTH') {
+    async takeProfit(symbol, takeProfitPrice, positionSide = 'BOTH') {
+        // Get current position to determine quantity
+        const positions = await account.getPositionInfo(symbol);
+        const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
+        
+        if (!position || parseFloat(position.positionAmt) === 0) {
+            throw new Error(`No open position for ${symbol} ${positionSide}`);
+        }
+        
+        const quantity = Math.abs(parseFloat(position.positionAmt));
+        
         return await this.placeOrder({
             symbol,
             side: 'SELL',
@@ -347,7 +377,8 @@ const trading = {
             positionSide,
             stopPrice: takeProfitPrice,
             quantity,
-            closePosition: true
+            workingType: 'MARK_PRICE',
+            reduceOnly: true
         });
     }
 };

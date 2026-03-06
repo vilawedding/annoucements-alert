@@ -762,9 +762,9 @@ async function checkUpbitAnnouncements() {
         }
         
         const totalDuration = Date.now() - fetchStart;
-        if (processed > 0 || totalDuration > 500) {
-            console.log(`   ⏱️ Total Upbit: ${totalDuration}ms (Fetch: ${fetchDuration}ms)`);
-        }
+        // if (processed > 0 || totalDuration > 500) {
+        //     console.log(`   ⏱️ Total Upbit: ${totalDuration}ms (Fetch: ${fetchDuration}ms)`);
+        // }
     } catch (error) {
         const totalDuration = Date.now() - fetchStart;
         console.error(`❌ Upbit error (${totalDuration}ms):`, error.message);
@@ -800,10 +800,10 @@ async function runUpbitMonitor() {
         try {
             const result = await checkUpbitAnnouncements();
             const duration = Date.now() - startTime;
-            console.log(`🔵 [UPB] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
+            // console.log(`🔵 [UPB] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
         } catch (error) {
             const duration = Date.now() - startTime;
-            console.error(`❌ [UPB] Cycle #${cycleCount} - ${duration}ms - Error: ${error.message}`);
+            // console.error(`❌ [UPB] Cycle #${cycleCount} - ${duration}ms - Error: ${error.message}`);
         }
         await new Promise(resolve => setTimeout(resolve, UPBIT_INTERVAL));
     }

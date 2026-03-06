@@ -161,21 +161,21 @@
     "orderedAt": null,
     "latency": null
   },
-  "d8a447bc4ee49432fa36b829de654b2b": {
-    "symbol": "LRCUSDT",
-    "title": "루프링(LRC) 거래 유의 종목 지정 안내",
-    "link": "https://upbit.com/notice",
-    "exchange": "UPBIT",
-    "detectedAt": 1772766781355,
-    "orderedAt": null,
-    "latency": null
-  },
   "bb55240c85b0ac68b02a6fac743de1f4": {
     "symbol": "EDGEUSDT",
     "title": "디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
     "link": "https://upbit.com/notice",
     "exchange": "UPBIT",
-    "detectedAt": 1772769857538,
+    "detectedAt": 1772772670209,
+    "orderedAt": null,
+    "latency": null
+  },
+  "d8a447bc4ee49432fa36b829de654b2b": {
+    "symbol": "LRCUSDT",
+    "title": "루프링(LRC) 거래 유의 종목 지정 안내",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1772772670211,
     "orderedAt": null,
     "latency": null
   }

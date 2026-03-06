@@ -90,9 +90,9 @@ async function runUpbitMonitor() {
             const result = await monitoring.upbit.check();
             const duration = Date.now() - startTime;
             
-            if (result.processed > 0 || duration > 500) {
-                console.log(`🔵 [UPB] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
-            }
+            // if (result.processed > 0 || duration > 500) {
+            //     console.log(`🔵 [UPB] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
+            // }
             
             // Trigger lightning-fast auto-trade if listing detected
             if (config.autoTrade.enabled && result.announcement && result.announcement._shouldTrade) {
