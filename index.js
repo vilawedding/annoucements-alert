@@ -58,11 +58,28 @@ function startHealthServer() {
     server.listen(config.server.port, () => {});
 }
 
+function formatTime(date) {
+    if (!date) return 'N/A';
+    const d = new Date(date);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const seconds = String(d.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+}
+
 // ==================== MONITOR RUNNERS ====================
 async function runBinanceMonitor() {
     while (true) {
         try {
-            await monitoring.binance.check();
+            const result = await monitoring.binance.check();
+            if (result?.latestAnnouncement) {
+                const a = result.latestAnnouncement;
+                const tokenText = a.tokens && a.tokens.length > 0 ? a.tokens.join(',') : 'N/A';
+                console.log(`📩 [BINANCE] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title}`);
+            }
         } catch (error) {
             // Silent fail
         }
@@ -74,20 +91,16 @@ async function runUpbitMonitor() {
     while (true) {
         try {
             const result = await monitoring.upbit.check();
+            if (result?.latestAnnouncement) {
+                const a = result.latestAnnouncement;
+                const tokenText = a.tokens && a.tokens.length > 0 ? a.tokens.join(',') : 'N/A';
+                console.log(`📩 [UPBIT] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title}`);
+            }
             
             // Trigger lightning-fast auto-trade if listing detected
             if (config.autoTrade.enabled && result.announcement && result.announcement._shouldTrade) {
                 const tradeStartTime = Date.now();
                 const detectionTime = result.announcement._detectionTime;
-                const timeFormat = (date) => {
-                    const year = date.getFullYear();
-                    const month = String(date.getMonth() + 1).padStart(2, '0');
-                    const day = String(date.getDate()).padStart(2, '0');
-                    const hours = String(date.getHours()).padStart(2, '0');
-                    const minutes = String(date.getMinutes()).padStart(2, '0');
-                    const seconds = String(date.getSeconds()).padStart(2, '0');
-                    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-                };
                 
                 const tradeResults = await lightningTrader.executeLight(result.announcement);
                 
@@ -97,8 +110,12 @@ async function runUpbitMonitor() {
                     const totalDuration = detectionTime ? tradeEndTime - detectionTime.getTime() : tradeDuration;
                     const successCount = tradeResults.filter(r => r.success).length;
                     const endTime = new Date();
-                    
-                    console.log(`✅ ${successCount}/${tradeResults.length} | ${tradeDuration}ms | ${totalDuration}ms | ${timeFormat(detectionTime)} → ${timeFormat(endTime)}`);
+                    const orderText = tradeResults
+                        .filter(r => r.success)
+                        .map(r => `${r.symbol}:entry=${r.entryPrice},qty=${r.executedQty || r.quantity},sl=${r.stopLoss},tp=${r.takeProfit},slId=${r.stopLossOrderId || 'N/A'},tpId=${r.takeProfitOrderId || 'N/A'}`)
+                        .join(' || ');
+
+                    console.log(`✅ [TRADE] ${successCount}/${tradeResults.length} | ${tradeDuration}ms | ${totalDuration}ms | ${formatTime(detectionTime)} → ${formatTime(endTime)} | ${orderText || 'NO_SUCCESS_ORDER'}`);
                 }
             }
         } catch (error) {

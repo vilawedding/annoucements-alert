@@ -134,8 +134,7 @@ class UpbitMonitor {
             return { processed: 0, sent: 0, announcement: null };
         }
         
-        let processed = 0, sent = 0, latestListing = null;
-        const fetchStart = Date.now();
+        let processed = 0, sent = 0, latestListing = null, latestAnnouncement = null;
         
         try {
             const articles = await this.fetchAnnouncements();
@@ -147,6 +146,7 @@ class UpbitMonitor {
                 if (announcement) {
                     const detectionTime = new Date();
                     announcement._detectionTime = detectionTime;
+                    latestAnnouncement = announcement;
                     
                     sent++;
                     
@@ -168,7 +168,7 @@ class UpbitMonitor {
             // Silent fail
         }
         
-        return { processed, sent, announcement: latestListing };
+        return { processed, sent, announcement: latestListing, latestAnnouncement };
     }
 }
 

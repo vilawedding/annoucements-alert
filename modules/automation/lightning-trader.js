@@ -35,7 +35,7 @@ class LightningAutoTrader {
             try {
                 await telegram.sendMessage(message);
             } catch (error) {
-                // Silent fail
+                console.error(`[TELEGRAM] send failed: ${error.message}`);
             }
             await new Promise(resolve => setTimeout(resolve, 100));
         }
@@ -88,6 +88,7 @@ class LightningAutoTrader {
                 if (!this.shouldRetryTradeError(error) || i === retries - 1) {
                     throw error;
                 }
+                console.warn(`[RETRY] ${i + 1}/${retries} failed: ${error.message}`);
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
         }
@@ -98,29 +99,7 @@ class LightningAutoTrader {
     /**
      * Execute trade with maximum speed
      */
-    async executeLight(announcement1) {
-//         const announcement = {
-//   hash: 'bb55240c85b0ac68b02a6fac743de1f4',
-//   exchange: 'UPBIT',
-//   category: 'LISTING',
-//   title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
-//   url: 'https://upbit.com/notice',
-//   symbol: 'DOTUSDT',
-//   releaseDate: 1772603400000,
-//   tokens: [ 'DOT' ],
-//   formattedDate: '3/4/2026, 14:50:00 (KST)',
-//   metadata: {
-//     symbol: 'DOTUSDT',
-//     title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
-//     link: 'https://upbit.com/notice',
-//     exchange: 'UPBIT',
-//     detectedAt: 1772765541466,
-//     orderedAt: null,
-//     latency: null
-//   },
-//   detectedAt: 1772765541466,
-//   _shouldTrade: true
-// }
+        async executeLight(announcement) {
 
         if (!this.config.enabled) return null;
         if (announcement.exchange !== 'UPBIT' || announcement.category !== 'LISTING') return null;
@@ -144,6 +123,7 @@ class LightningAutoTrader {
                 
                 // Get precision for TP/SL calculation
                 const precision = await fastCache.getSymbolPrecision(symbol, this.binance).catch(error => {
+                    console.error(`[PRECISION] ${symbol} failed: ${error.message}`);
                     throw error;
                 });
                 
@@ -152,7 +132,9 @@ class LightningAutoTrader {
                 }
                 
                 // Set leverage (fast - non-blocking)
-                this.binance.changeInitialLeverage(symbol, this.config.leverage).catch(() => {});
+                this.binance.changeInitialLeverage(symbol, this.config.leverage).catch((error) => {
+                    console.warn(`[LEVERAGE] ${symbol} set failed: ${error.message}`);
+                });
                 
                 // Place BUY order with TP/SL using fast retry (listing race condition)
                 const order = await this.sniperRetry(
@@ -191,12 +173,22 @@ class LightningAutoTrader {
                 
                 // Record order execution in storage with millisecond precision
                 if (announcementHash) {
-                    storage.recordOrderExecution(announcementHash, orderExecutionTime, 'UPBIT');
-                    await storage.saveUpbit().catch(err => {});
+                    const sourceExchange = announcement.exchange === 'BINANCE' ? 'BINANCE' : 'UPBIT';
+                    storage.recordOrderExecution(announcementHash, orderExecutionTime, sourceExchange);
+                    if (sourceExchange === 'BINANCE') {
+                        await storage.saveBinance().catch((error) => {
+                            console.error(`[STORAGE] saveBinance failed: ${error.message}`);
+                        });
+                    } else {
+                        await storage.saveUpbit().catch((error) => {
+                            console.error(`[STORAGE] saveUpbit failed: ${error.message}`);
+                        });
+                    }
                 }
                 
             } catch (error) {
                 const tradeDuration = Date.now() - tradeStartTime;
+                console.error(`[TRADE] ${symbol} failed in ${tradeDuration}ms: ${error.message}`);
                 
                 const result = {
                     token,

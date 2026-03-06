@@ -191,10 +191,10 @@ class BinanceMonitor {
     
     async check() {
         if (!this.config.enabled) {
-            return { processed: 0, sent: 0 };
+            return { processed: 0, sent: 0, latestAnnouncement: null };
         }
         
-        let processed = 0, sent = 0;
+        let processed = 0, sent = 0, latestAnnouncement = null;
         
         try {
             for (const catalogId of this.catalogIds) {
@@ -207,20 +207,21 @@ class BinanceMonitor {
                         
                         if (announcement) {
                             sent++;
+                            latestAnnouncement = announcement;
                             storage.add(announcement.hash, announcement.metadata, 'BINANCE');
                             await storage.saveBinance();
                             await new Promise(resolve => setTimeout(resolve, 100));
                         }
                     }
                 } catch (error) {
-                    // Silent fail
+                    console.error(`[BINANCE] Error processing catalog ${catalogId}: ${error.message}`);
                 }
             }
         } catch (error) {
-            // Silent fail
+            console.error(`[BINANCE] Error checking announcements: ${error.message}`);
         }
         
-        return { processed, sent };
+        return { processed, sent, latestAnnouncement };
     }
 }
 
