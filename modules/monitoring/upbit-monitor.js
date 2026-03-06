@@ -15,7 +15,6 @@ class UpbitMonitor {
     
     async fetchAnnouncements() {
         try {
-            const startTime = Date.now();
             const url = `${this.config.apiUrl}?os=web&page=1&per_page=20&category=trade`;
             
             const response = await axios.get(url, {
@@ -25,11 +24,6 @@ class UpbitMonitor {
                 },
                 timeout: 10000
             });
-            
-            const duration = Date.now() - startTime;
-            if (duration > 2000) {
-                console.log(`   ⏱️ Upbit API: ${duration}ms`);
-            }
             
             if (response.data.success) {
                 const notices = response.data.data.notices;
@@ -46,7 +40,6 @@ class UpbitMonitor {
             return [];
             
         } catch (error) {
-            console.error('❌ Upbit error:', error.message);
             return [];
         }
     }
@@ -146,57 +139,33 @@ class UpbitMonitor {
         
         try {
             const articles = await this.fetchAnnouncements();
-            const fetchDuration = Date.now() - fetchStart;
             
             for (const article of articles) {
-                const itemStart = Date.now();
                 processed++;
                 const announcement = await this.processAnnouncement(article);
                 
                 if (announcement) {
-                    const message = telegram.createAnnouncementMessage(announcement);
-                    console.log(`🔵 [UPB] ${announcement.title.substring(0, 60)}...`);
-                    
-                    // Non-blocking telegram send
-                    // telegram.sendMessage(message).catch(err => 
-                    //     console.error('❌ Telegram send error:', err.message)
-                    // );
+                    const detectionTime = new Date();
+                    announcement._detectionTime = detectionTime;
                     
                     sent++;
                     
                     // Store with detailed metadata including detection timestamp
                     storage.add(announcement.hash, announcement.metadata, 'UPBIT');
-                    
-                    // Save asynchronously (non-blocking)
-                    storage.saveUpbit().catch(err => 
-                        console.error('❌ Storage save error:', err.message)
-                    );
+                    storage.saveUpbit().catch(err => {});
                     
                     // Mark for auto-trade if it's a listing
                     if (announcement._shouldTrade) {
                         latestListing = announcement;
                     }
                     
-                    // No delay for first announcement - trade immediately
-                    // Only delay if there are multiple
                     if (sent > 1) {
                         await new Promise(resolve => setTimeout(resolve, 50));
                     }
                 }
-                
-                const itemDuration = Date.now() - itemStart;
-                if (itemDuration > 1000) {
-                    console.log(`   ⏱️ Item processed in ${itemDuration}ms`);
-                }
             }
-            
-            const totalDuration = Date.now() - fetchStart;
-            // if (processed > 0 || totalDuration > 500) {
-            //     console.log(`   ⏱️ Total Upbit: ${totalDuration}ms (Fetch: ${fetchDuration}ms)`);
-            // }
         } catch (error) {
-            const totalDuration = Date.now() - fetchStart;
-            console.error(`❌ Upbit error (${totalDuration}ms):`, error.message);
+            // Silent fail
         }
         
         return { processed, sent, announcement: latestListing };

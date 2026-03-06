@@ -35,7 +35,7 @@ class LightningAutoTrader {
             try {
                 await telegram.sendMessage(message);
             } catch (error) {
-                console.error('❌ Telegram queue error:', error.message);
+                // Silent fail
             }
             await new Promise(resolve => setTimeout(resolve, 100));
         }
@@ -99,28 +99,28 @@ class LightningAutoTrader {
      * Execute trade with maximum speed
      */
     async executeLight(announcement1) {
-        const announcement = {
-  hash: 'bb55240c85b0ac68b02a6fac743de1f4',
-  exchange: 'UPBIT',
-  category: 'LISTING',
-  title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
-  url: 'https://upbit.com/notice',
-  symbol: 'DOTUSDT',
-  releaseDate: 1772603400000,
-  tokens: [ 'DOT' ],
-  formattedDate: '3/4/2026, 14:50:00 (KST)',
-  metadata: {
-    symbol: 'DOTUSDT',
-    title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
-    link: 'https://upbit.com/notice',
-    exchange: 'UPBIT',
-    detectedAt: 1772765541466,
-    orderedAt: null,
-    latency: null
-  },
-  detectedAt: 1772765541466,
-  _shouldTrade: true
-}
+//         const announcement = {
+//   hash: 'bb55240c85b0ac68b02a6fac743de1f4',
+//   exchange: 'UPBIT',
+//   category: 'LISTING',
+//   title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
+//   url: 'https://upbit.com/notice',
+//   symbol: 'DOTUSDT',
+//   releaseDate: 1772603400000,
+//   tokens: [ 'DOT' ],
+//   formattedDate: '3/4/2026, 14:50:00 (KST)',
+//   metadata: {
+//     symbol: 'DOTUSDT',
+//     title: '디피니티브(EDGE) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)',
+//     link: 'https://upbit.com/notice',
+//     exchange: 'UPBIT',
+//     detectedAt: 1772765541466,
+//     orderedAt: null,
+//     latency: null
+//   },
+//   detectedAt: 1772765541466,
+//   _shouldTrade: true
+// }
 
         if (!this.config.enabled) return null;
         if (announcement.exchange !== 'UPBIT' || announcement.category !== 'LISTING') return null;
@@ -141,11 +141,9 @@ class LightningAutoTrader {
             const tradeStartTime = Date.now();
             
             try {
-                console.log(`🚀 [TRADE] ${symbol}`);
                 
                 // Get precision for TP/SL calculation
                 const precision = await fastCache.getSymbolPrecision(symbol, this.binance).catch(error => {
-                    console.log(`⚠️ ${symbol} unavailable`);
                     throw error;
                 });
                 
@@ -190,29 +188,14 @@ class LightningAutoTrader {
                 };
                 
                 tradeResults.push(result);
-                console.log(`✅ [TRADE] ${symbol} in ${tradeDuration}ms`);
-                console.log(`   Entry: ${order.entryPrice}`);
-                console.log(`   📉 SL: ${result.stopLoss}`);
-                console.log(`   📈 TP: ${result.takeProfit}`);
-                console.log(`   🧷 SL orderId: ${result.stopLossOrderId || 'N/A'}`);
-                console.log(`   🧷 TP orderId: ${result.takeProfitOrderId || 'N/A'}`);
                 
                 // Record order execution in storage with millisecond precision
                 if (announcementHash) {
                     storage.recordOrderExecution(announcementHash, orderExecutionTime, 'UPBIT');
-                    await storage.saveUpbit().catch(err =>
-                        console.error('❌ Storage save error:', err.message)
-                    );
+                    await storage.saveUpbit().catch(err => {});
                 }
                 
-                // Send notification asynchronously (non-blocking)
-                // const tradeMessage = telegram.createTradeMessage(result);
-                // this.queueTelegramMessage(tradeMessage);
-                
-                // No delay between trades - send immediately
-                
             } catch (error) {
-                console.log(error)
                 const tradeDuration = Date.now() - tradeStartTime;
                 
                 const result = {
@@ -224,7 +207,6 @@ class LightningAutoTrader {
                 };
                 
                 tradeResults.push(result);
-                console.error(`❌ [TRADE] ${symbol} failed (${tradeDuration}ms): ${error.message}`);
                 
                 // Send error notification asynchronously
                 const errorMessage = telegram.createErrorMessage(token, symbol, error.message);
@@ -234,8 +216,6 @@ class LightningAutoTrader {
         
         const totalDuration = Date.now() - executionStartTime;
         perfOptimizer.recordMetric('tradingExecution', totalDuration);
-        
-        console.log(`⚡ Total execution: ${totalDuration}ms for ${tokens.length} tokens`);
         
         return tradeResults.length > 0 ? tradeResults : null;
     }

@@ -1,23 +1,182 @@
-[
-  "fb5dd60b79c1245473d516dc5505a05c",
-  "30c749f3324eb0adb0f9f762832f6a18",
-  "3d65e31f4c8d2b97a8a596fc4f0e1978",
-  "f8aa5335fa8c384ef02dbb01da4c30b6",
-  "8801bf9e38b7b3c3c02278ed37c09de5",
-  "95b706fc23b0b50f79a3453d872cc87e",
-  "af91b4e60017f2f3bd0e0f8c015b5a77",
-  "125ab867b3cbe96a6b576b474fa8d9e5",
-  "8ac89c319d715e7771cbbf1174b66a6b",
-  "0018831f810a629264a06154e9258821",
-  "9906d8888a7afa1e17fbdbcd4b949bab",
-  "64eacd5c18cdb6abfe3dec673bd7619a",
-  "c983da64837bf05d528abd2b9f095628",
-  "083aac72020ec5daac6442b55b464096",
-  "3f2835ac4114720a00d429edd1a888c4",
-  "c87866c8c79fd977e65afe4dd1da71d0",
-  "7436d4be072d4cb778549600bbc097e2",
-  "6ff6671bc1bfc007889c4f2e2a5c74be",
-  "72d67dc505304e4ae62c4be068b7a2d8",
-  "b1b40a620bf129998851b8021f840d6e",
-  "f7eba7f287eedd6ea57eb4539da55054"
-]
+{
+  "7cfdec2a0012b7af347ad890df0d9808": {
+    "symbol": "OPNUSDT",
+    "title": "Binance Will Add Opinion (OPN) on Earn, Buy Crypto, Convert, VIP Loan, Margin & Futures",
+    "link": "https://www.binance.com/en/support/announcement/b3ef81d0193c42e791d517481867b558",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614265,
+    "orderedAt": null,
+    "latency": null
+  },
+  "eb7085ad02731706c3302c6969a6941d": {
+    "symbol": "ROBOUSDT",
+    "title": "Binance Will Add Fabric Protocol (ROBO) on Earn, Buy Crypto, Convert, VIP Loan & Margin",
+    "link": "https://www.binance.com/en/support/announcement/caec3d0eff0546be94e5b56844e0c432",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614371,
+    "orderedAt": null,
+    "latency": null
+  },
+  "9840b20c7e3590d9d27b3f44e3b5c0cf": {
+    "symbol": "ROBOUSDT",
+    "title": "Binance Will List Fabric Protocol (ROBO) with Seed Tag Applied",
+    "link": "https://www.binance.com/en/support/announcement/82c9c8166a2a434681c20a23a346a5b8",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614474,
+    "orderedAt": null,
+    "latency": null
+  },
+  "d0ee5a72a606e9dd054e95eca6340856": {
+    "symbol": "COPPERUSDT",
+    "title": "Binance Futures Will Launch USDⓈ-Margined COPPERUSDT Perpetual Contract (2026-03-06)",
+    "link": "https://www.binance.com/en/support/announcement/44a37bb537b3460aafed58b8d68f5313",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614575,
+    "orderedAt": null,
+    "latency": null
+  },
+  "17b10df08fab76479ced778ebb0b9a7a": {
+    "symbol": "MANTRAUSDT",
+    "title": "Binance Will Add MANTRA (MANTRA) on Earn, Buy Crypto, Convert, VIP Loan, Margin & Futures",
+    "link": "https://www.binance.com/en/support/announcement/e2571aedb19d4e66876089fcc7a8f601",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614677,
+    "orderedAt": null,
+    "latency": null
+  },
+  "1f2fcb32ace415e6b4fff003eadf7559": {
+    "symbol": "",
+    "title": "Binance Margin Will Add New Pairs - 2026-03-05",
+    "link": "https://www.binance.com/en/support/announcement/6e0cd5fcbb5746db84ba0b2f2f055d2b",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614779,
+    "orderedAt": null,
+    "latency": null
+  },
+  "c97b118e4b78d6009fe7bfe0a89881ac": {
+    "symbol": "",
+    "title": "Notice on New Trading Pairs & Trading Bots Services on Binance Spot - 2026-03-05",
+    "link": "https://www.binance.com/en/support/announcement/ef499f7320c14852b4fd3328f948caaf",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614881,
+    "orderedAt": null,
+    "latency": null
+  },
+  "cc6aca00888070474120494ca6e574a0": {
+    "symbol": "OPNUSDT",
+    "title": "Introducing Opinion (OPN) on Binance Launchpool! Farm OPN by Locking BNB, USDC, U, and USD1",
+    "link": "https://www.binance.com/en/support/announcement/d5810276f8c44fa7ade2b93746cd6a0a",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784614983,
+    "orderedAt": null,
+    "latency": null
+  },
+  "ef19cfc03e6ddd1b076f2bf4964179f0": {
+    "symbol": "",
+    "title": "Notice on New Trading Pairs & Trading Bots Services on Binance Spot - 2026-03-03",
+    "link": "https://www.binance.com/en/support/announcement/9693980663654676be7a7b3234c35c91",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784615085,
+    "orderedAt": null,
+    "latency": null
+  },
+  "d91a3600cbe2d6f66d7a6a28a9c7a9df": {
+    "symbol": "KATUSDT",
+    "title": "Binance Futures Will Launch USDⓈ-Margined KATUSDT Perpetual Contract Pre-Market Trading (2026-03-02)",
+    "link": "https://www.binance.com/en/support/announcement/d07ab8a296854013992d336e1d1f7488",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784615187,
+    "orderedAt": null,
+    "latency": null
+  },
+  "d0c1bcf9fb3abaeb0cfd05164cdb7420": {
+    "symbol": "",
+    "title": "Notice of Removal of Spot Trading Pairs - 2026-03-06",
+    "link": "https://www.binance.com/en/support/announcement/7bd34bbcdd994fe5920b33dc347db0ff",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784615377,
+    "orderedAt": null,
+    "latency": null
+  },
+  "e3b9ee67db683ffb863cb3018194a1b9": {
+    "symbol": "",
+    "title": "Notice of Removal of Margin Trading Pairs - 2026-03-05",
+    "link": "https://www.binance.com/en/support/announcement/031a5a6bef924bbe96e407dbfc23e6dc",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784617051,
+    "orderedAt": null,
+    "latency": null
+  },
+  "9906d8888a7afa1e17fbdbcd4b949bab": {
+    "symbol": "",
+    "title": "Notice of Removal of Spot Trading Pairs - 2026-02-27",
+    "link": "https://www.binance.com/en/support/announcement/bc62fa3ea64d4326ac32781b50565519",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784619090,
+    "orderedAt": null,
+    "latency": null
+  },
+  "64eacd5c18cdb6abfe3dec673bd7619a": {
+    "symbol": "",
+    "title": "Notice of Removal of Margin Token and Trading Pairs - 2026-02-26",
+    "link": "https://www.binance.com/en/support/announcement/4fccf352384c4f32b54d8f3184fe2af7",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784619742,
+    "orderedAt": null,
+    "latency": null
+  },
+  "c983da64837bf05d528abd2b9f095628": {
+    "symbol": "",
+    "title": "Notice of Removal of Spot Trading Pairs - 2026-02-13",
+    "link": "https://www.binance.com/en/support/announcement/d2c0b9f4c1e94260b04be48036522cfe",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784620379,
+    "orderedAt": null,
+    "latency": null
+  },
+  "083aac72020ec5daac6442b55b464096": {
+    "symbol": "",
+    "title": "Notice of Removal of Margin Trading Pairs - 2026-02-13",
+    "link": "https://www.binance.com/en/support/announcement/42fa3f9c987b406b83f35f4460ca2714",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784620966,
+    "orderedAt": null,
+    "latency": null
+  },
+  "3f2835ac4114720a00d429edd1a888c4": {
+    "symbol": "",
+    "title": "Notice of Removal of Spot Trading Pairs - 2026-02-10",
+    "link": "https://www.binance.com/en/support/announcement/fa494850a7a34b4ebdc6e55beb40f63f",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784621562,
+    "orderedAt": null,
+    "latency": null
+  },
+  "c87866c8c79fd977e65afe4dd1da71d0": {
+    "symbol": "",
+    "title": "Notice of Removal of Spot Trading Pairs - 2026-02-06",
+    "link": "https://www.binance.com/en/support/announcement/53d255cc249741b7965558493b46f5e6",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784622490,
+    "orderedAt": null,
+    "latency": null
+  },
+  "7436d4be072d4cb778549600bbc097e2": {
+    "symbol": "RVVUSDT",
+    "title": "Binance Futures Will Delist USDⓈ-M RVVUSDT and YALAUSDT Perpetual Contracts (2026-02-10)",
+    "link": "https://www.binance.com/en/support/announcement/9ac36fb4f2ad4bf2b3b27f9c9224739c",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784622592,
+    "orderedAt": null,
+    "latency": null
+  },
+  "6ff6671bc1bfc007889c4f2e2a5c74be": {
+    "symbol": "",
+    "title": "Notice of Removal of Margin Trading Pairs - 2026-02-06",
+    "link": "https://www.binance.com/en/support/announcement/511c2fbe48a6429f91ad28d99cffc826",
+    "exchange": "BINANCE",
+    "detectedAt": 1772784622738,
+    "orderedAt": null,
+    "latency": null
+  }
+}

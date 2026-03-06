@@ -708,9 +708,9 @@ async function checkBinanceAnnouncements() {
     }
     
     const totalDuration = Date.now() - fetchStart;
-    if (processed > 0 || totalDuration > 500) {
-        console.log(`   ⏱️ Total Binance: ${totalDuration}ms`);
-    }
+    // if (processed > 0 || totalDuration > 500) {
+    //     console.log(`   ⏱️ Total Binance: ${totalDuration}ms`);
+    // }
     
     return { processed, sent };
 }
@@ -782,10 +782,10 @@ async function runBinanceMonitor() {
         try {
             const result = await checkBinanceAnnouncements();
             const duration = Date.now() - startTime;
-            console.log(`🟡 [BIN] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
+            // console.log(`🟡 [BIN] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
         } catch (error) {
             const duration = Date.now() - startTime;
-            console.error(`❌ [BIN] Cycle #${cycleCount} - ${duration}ms - Error: ${error.message}`);
+            // console.error(`❌ [BIN] Cycle #${cycleCount} - ${duration}ms - Error: ${error.message}`);
         }
         await new Promise(resolve => setTimeout(resolve, BINANCE_INTERVAL));
     }

@@ -55,61 +55,54 @@ function startHealthServer() {
         }));
     });
     
-    server.listen(config.server.port, () => {
-        console.log(`🚀 Health server running on port ${config.server.port}`);
-        console.log(`   📊 Check performance: curl http://localhost:${config.server.port}`);
-    });
+    server.listen(config.server.port, () => {});
 }
 
 // ==================== MONITOR RUNNERS ====================
 async function runBinanceMonitor() {
-    let cycleCount = 0;
     while (true) {
-        cycleCount++;
-        const startTime = Date.now();
         try {
-            const result = await monitoring.binance.check();
-            const duration = Date.now() - startTime;
-            if (result.processed > 0 || duration > 500) {
-                console.log(`🟡 [BIN] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
-            }
+            await monitoring.binance.check();
         } catch (error) {
-            const duration = Date.now() - startTime;
-            console.error(`❌ [BIN] Cycle #${cycleCount} - ${duration}ms - Error: ${error.message}`);
+            // Silent fail
         }
         await new Promise(resolve => setTimeout(resolve, config.exchanges.binance.interval));
     }
 }
 
 async function runUpbitMonitor() {
-    let cycleCount = 0;
     while (true) {
-        cycleCount++;
-        const startTime = Date.now();
         try {
             const result = await monitoring.upbit.check();
-            const duration = Date.now() - startTime;
-            
-            // if (result.processed > 0 || duration > 500) {
-            //     console.log(`🔵 [UPB] Cycle #${cycleCount} - ${duration}ms (${result.processed}/${result.sent})`);
-            // }
             
             // Trigger lightning-fast auto-trade if listing detected
             if (config.autoTrade.enabled && result.announcement && result.announcement._shouldTrade) {
                 const tradeStartTime = Date.now();
-                console.log(`⚡ [AUTO-TRADE] Triggering for Upbit listing...`);
+                const detectionTime = result.announcement._detectionTime;
+                const timeFormat = (date) => {
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    const hours = String(date.getHours()).padStart(2, '0');
+                    const minutes = String(date.getMinutes()).padStart(2, '0');
+                    const seconds = String(date.getSeconds()).padStart(2, '0');
+                    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+                };
                 
                 const tradeResults = await lightningTrader.executeLight(result.announcement);
                 
                 if (tradeResults && tradeResults.length > 0) {
-                    const tradeDuration = Date.now() - tradeStartTime;
+                    const tradeEndTime = Date.now();
+                    const tradeDuration = tradeEndTime - tradeStartTime;
+                    const totalDuration = detectionTime ? tradeEndTime - detectionTime.getTime() : tradeDuration;
                     const successCount = tradeResults.filter(r => r.success).length;
-                    console.log(`✅ [AUTO-TRADE] Completed ${successCount}/${tradeResults.length} trades in ${tradeDuration}ms`);
+                    const endTime = new Date();
+                    
+                    console.log(`✅ ${successCount}/${tradeResults.length} | ${tradeDuration}ms | ${totalDuration}ms | ${timeFormat(detectionTime)} → ${timeFormat(endTime)}`);
                 }
             }
         } catch (error) {
-            const duration = Date.now() - startTime;
-            console.error(`❌ [UPB] Cycle #${cycleCount} - ${duration}ms - Error: ${error.message}`);
+            // Silent fail
         }
         await new Promise(resolve => setTimeout(resolve, config.exchanges.upbit.interval));
     }
@@ -151,75 +144,27 @@ async function main() {
         process.exit(1);
     }
     
-    console.log(`✅ Configuration loaded`);
-    console.log(`🤖 Telegram Bot: Connected`);
-    console.log(`\n📊 Enabled exchanges:`);
-    console.log(`   ${config.exchanges.binance.enabled ? '✅' : '❌'} ${config.exchanges.binance.name} (${config.exchanges.binance.interval}ms interval)`);
-    console.log(`   ${config.exchanges.upbit.enabled ? '✅' : '❌'} ${config.exchanges.upbit.name} (${config.exchanges.upbit.interval}ms interval)`);
-    
-    console.log(`\n⚡ Auto-trading (Lightning Fast):`);
-    console.log(`   ${config.autoTrade.enabled ? '✅' : '❌'} Auto-trade ${config.autoTrade.enabled ? 'ENABLED' : 'DISABLED'}`);
-    if (config.autoTrade.enabled) {
-        console.log(`   💰 Trade Amount: ${config.autoTrade.amount} USDT`);
-        console.log(`   📊 Leverage: ${config.autoTrade.leverage}x`);
-        console.log(`   🔵 Upbit Listing: ${config.autoTrade.upbitListing ? 'ENABLED' : 'DISABLED'}`);
-        
-        const trading = require('./modules/trading');
-        console.log(`   🌐 Binance: ${trading.binance.USE_TESTNET ? 'TESTNET' : 'PRODUCTION'}`);
-        
-        console.log(`\n⚡ Optimizations enabled:`);
-        console.log(`   ✅ Non-blocking Telegram queue`);
-        console.log(`   ✅ Parallel price & precision fetching`);
-        console.log(`   ✅ Smart caching for symbol data`);
-        console.log(`   ✅ Async leverage setting`);
-        console.log(`   ✅ Minimal delays between trades`);
-        console.log(`   ✅ Fast token extraction`);
-    }
-    
-    console.log(`\n💾 Loading storage...`);
     await storage.loadAll();
-    
-    const stats = storage.getStats();
-    console.log(`   📊 Total: ${stats.total}`);
-    console.log(`   🟡 Binance: ${stats.binance}`);
-    console.log(`   🔵 Upbit: ${stats.upbit}`);
-    
-    // Start health server
     startHealthServer();
     
-    // Start independent monitors in parallel
-    console.log(`\n🚀 Starting parallel monitors...`);
-    
-    // if (config.exchanges.binance.enabled) {
-    //     runBinanceMonitor().catch(error => console.error('❌ Binance monitor crashed:', error));
-    //     console.log(`✅ Binance monitor started (${config.exchanges.binance.interval}ms interval)`);
-    // }
-    
-    if (config.exchanges.upbit.enabled) {
-        runUpbitMonitor().catch(error => console.error('❌ Upbit monitor crashed:', error));
-        console.log(`✅ Upbit monitor started (${config.exchanges.upbit.interval}ms interval)`);
+    if (config.exchanges.binance.enabled) {
+        runBinanceMonitor().catch(() => {});
     }
     
-    console.log(`\n⚡ Bot is now running with LIGHTNING FAST execution!`);
-    console.log(`📱 Telegram notifications will be sent to chat: ${config.telegram.chatId}`);
-    console.log(`📊 Performance stats available at: http://localhost:${config.server.port}`);
+    if (config.exchanges.upbit.enabled) {
+        runUpbitMonitor().catch(() => {});
+    }
+    
+    console.log(`⚡ Bot running | Auto-trade: ${config.autoTrade.enabled ? 'ON' : 'OFF'}`);
     
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
-        console.log(`\n👋 Shutting down bot...`);
         await storage.saveAll();
-        const finalStats = storage.getStats();
-        console.log(`💾 Saved all announcements to storage`);
-        console.log(`   Total: ${finalStats.total}`);
-        console.log(`   Binance: ${finalStats.binance}`);
-        console.log(`   Upbit: ${finalStats.upbit}`);
-        console.log(`🛑 Bot stopped`);
         process.exit(0);
     });
 }
 
 // ==================== START THE BOT ====================
 main().catch(error => {
-    console.error('💥 Fatal error during startup:', error);
     process.exit(1);
 });

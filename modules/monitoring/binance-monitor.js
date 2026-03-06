@@ -18,7 +18,6 @@ class BinanceMonitor {
     
     async fetchAnnouncements(catalogId) {
         try {
-            const startTime = Date.now();
             const url = `https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query?type=1&pageNo=1&pageSize=10&catalogId=${catalogId}`;
             
             const response = await axios.get(url, {
@@ -28,11 +27,6 @@ class BinanceMonitor {
                 },
                 timeout: 10000
             });
-            
-            const duration = Date.now() - startTime;
-            if (duration > 2000) {
-                console.log(`   ⏱️ Binance API (Catalog ${catalogId}): ${duration}ms`);
-            }
             
             if (response.data.success && response.data.data?.catalogs?.length > 0) {
                 const catalog = response.data.data.catalogs[0];
@@ -50,7 +44,6 @@ class BinanceMonitor {
             return { name: this.catalogNames[catalogId] || `Catalog ${catalogId}`, articles: [] };
             
         } catch (error) {
-            console.error(`❌ Binance catalog ${catalogId}:`, error.message);
             return { name: this.catalogNames[catalogId] || `Catalog ${catalogId}`, articles: [] };
         }
     }
@@ -94,7 +87,6 @@ class BinanceMonitor {
             return Array.from(tokens);
             
         } catch (error) {
-            console.error('❌ Error parsing detailed page:', error.message);
             return [];
         }
     }
@@ -155,7 +147,6 @@ class BinanceMonitor {
         const tokens = this.extractTokens(title);
         
         if (category === 'DELISTING' && (tokens.length === 0 || title.toLowerCase().includes('multiple'))) {
-            console.log(`🔍 Parsing detailed page for delisting: ${title}`);
             const detailedTokens = await this.parseDelistDetails(code);
             if (detailedTokens.length > 0) {
                 tokens.push(...detailedTokens);
@@ -204,7 +195,6 @@ class BinanceMonitor {
         }
         
         let processed = 0, sent = 0;
-        const fetchStart = Date.now();
         
         try {
             for (const catalogId of this.catalogIds) {
@@ -212,40 +202,22 @@ class BinanceMonitor {
                     const catalogData = await this.fetchAnnouncements(catalogId);
                     
                     for (const article of catalogData.articles) {
-                        const itemStart = Date.now();
                         processed++;
                         const announcement = await this.processAnnouncement(article);
                         
                         if (announcement) {
-                            const message = telegram.createAnnouncementMessage(announcement);
-                            console.log(`🟡 [BIN] ${announcement.title.substring(0, 60)}...`);
-                            const success = await telegram.sendMessage(message);
-                            
-                            if (success) {
-                                sent++;
-                                // Store with detailed metadata including detection timestamp
-                                storage.add(announcement.hash, announcement.metadata, 'BINANCE');
-                                await storage.saveBinance();
-                                await new Promise(resolve => setTimeout(resolve, 100));
-                            }
-                        }
-                        
-                        const itemDuration = Date.now() - itemStart;
-                        if (itemDuration > 1000) {
-                            console.log(`   ⏱️ Item processed in ${itemDuration}ms`);
+                            sent++;
+                            storage.add(announcement.hash, announcement.metadata, 'BINANCE');
+                            await storage.saveBinance();
+                            await new Promise(resolve => setTimeout(resolve, 100));
                         }
                     }
                 } catch (error) {
-                    console.error(`❌ Binance catalog ${catalogId}:`, error.message);
+                    // Silent fail
                 }
             }
         } catch (error) {
-            console.error('❌ Binance error:', error.message);
-        }
-        
-        const totalDuration = Date.now() - fetchStart;
-        if (processed > 0 || totalDuration > 500) {
-            console.log(`   ⏱️ Total Binance: ${totalDuration}ms`);
+            // Silent fail
         }
         
         return { processed, sent };

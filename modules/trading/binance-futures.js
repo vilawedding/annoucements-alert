@@ -14,6 +14,9 @@ const BASE_URL = config.binanceFutures.useTestnet
 const API_KEY = config.binanceFutures.apiKey;
 const API_SECRET = config.binanceFutures.apiSecret;
 
+// Server time cache for ultra-fast execution (avoid repeated server time calls)
+let serverTimeCache = { time: null, lastFetch: 0, offsetMs: 0 };
+
 // Keep-alive client for lower latency on repeated requests
 const httpClient = axios.create({
     timeout: 10000,
@@ -56,9 +59,22 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
     const requestParams = { ...params };
     
     if (requiresSignature) {
-        // Use server time instead of local time to avoid timestamp drift
-        const serverTime = await marketData.getServerTime().catch(() => Date.now());
-        requestParams.timestamp = serverTime;
+        // Use cached server time or current local time with offset (ultra-fast)
+        const now = Date.now();
+        const timeSinceLastFetch = now - serverTimeCache.lastFetch;
+        
+        // If cache is fresh (within 30s), use it; otherwise, fetch new server time
+        if (serverTimeCache.time && timeSinceLastFetch < 30000) {
+            // Calculate current server time by adding elapsed time to cached time
+            requestParams.timestamp = serverTimeCache.time + timeSinceLastFetch;
+        } else {
+            // Fetch new server time asynchronously (non-blocking - won't wait if possible)
+            const serverTime = await marketData.getServerTime().catch(() => Date.now());
+            serverTimeCache.time = serverTime;
+            serverTimeCache.lastFetch = now;
+            requestParams.timestamp = serverTime;
+        }
+        
         // Signature must be calculated on non-URL-encoded string
         const queryString = buildQueryString(requestParams);
         requestParams.signature = createSignature(queryString);
@@ -82,8 +98,6 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
         const response = await httpClient(config);
         return response.data;
     } catch (err) {
-        const errorData = err.response?.data || err.message;
-        console.error(`[BINANCE ERROR] ${method} ${endpoint}`, JSON.stringify(errorData, null, 2));
         throw err;
     }
 }
@@ -292,12 +306,10 @@ const trading = {
         const markPrice = currentPrice;
         
         if (stopLossPrice >= markPrice) {
-            console.error(`[VALIDATION] STOP_MARKET direction invalid: stopLossPrice (${stopLossPrice}) >= markPrice (${markPrice})`);
             throw new Error(`STOP_MARKET invalid. stopLossPrice >= markPrice`);
         }
         
         if (takeProfitPrice <= markPrice) {
-            console.error(`[VALIDATION] TAKE_PROFIT_MARKET direction invalid: takeProfitPrice (${takeProfitPrice}) <= markPrice (${markPrice})`);
             throw new Error(`TAKE_PROFIT_MARKET invalid. takeProfitPrice <= markPrice`);
         }
         
@@ -310,7 +322,7 @@ const trading = {
         let slOrder = null;
         let tpOrder = null;
         
-        // ===== PLACE STOP LOSS (SL is more critical) =====
+        // ===== PLACE BOTH SL AND TP IN PARALLEL (Ultra-fast execution) =====
         const slParams = {
             symbol,
             side: 'SELL',
@@ -322,25 +334,6 @@ const trading = {
             reduceOnly: true
         };
         
-        try {
-            slOrder = await this.placeOrder(slParams);
-            console.log(`[SL PLACED] ${symbol} @ ${stopLossPrice}`);
-        } catch (e) {
-            // Check if error is -4120 (order type not supported for endpoint)
-            if (e.response?.data?.code === -4120) {
-                console.warn(`[SL ALGO FALLBACK] ${symbol} - using /fapi/v1/algoOrder`);
-                try {
-                    slOrder = await this.placeAlgoOrder(slParams);
-                    console.log(`[SL ALGO PLACED] ${symbol} @ ${stopLossPrice}`);
-                } catch (algoErr) {
-                    console.error(`[SL ALGO FAILED] ${symbol}`, algoErr.response?.data || algoErr.message);
-                }
-            } else {
-                console.error(`[SL FAILED] ${symbol}`, e.response?.data || e.message);
-            }
-        }
-        
-        // ===== PLACE TAKE PROFIT (only if SL succeeded) =====
         const tpParams = {
             symbol,
             side: 'SELL',
@@ -352,32 +345,55 @@ const trading = {
             reduceOnly: true
         };
         
-        try {
-            tpOrder = await this.placeOrder(tpParams);
-            console.log(`[TP PLACED] ${symbol} @ ${takeProfitPrice}`);
-        } catch (e) {
-            // Check if error is -4120 (order type not supported for endpoint)
-            if (e.response?.data?.code === -4120) {
-                console.warn(`[TP ALGO FALLBACK] ${symbol} - using /fapi/v1/algoOrder`);
+        // Execute both orders in parallel
+        const [slResult, tpResult] = await Promise.allSettled([
+            (async () => {
                 try {
-                    tpOrder = await this.placeAlgoOrder(tpParams);
-                    console.log(`[TP ALGO PLACED] ${symbol} @ ${takeProfitPrice}`);
-                } catch (algoErr) {
-                    console.error(`[TP ALGO FAILED] ${symbol}`, algoErr.response?.data || algoErr.message);
+                    const result = await this.placeOrder(slParams);
+                    return { success: true, order: result, type: 'regular' };
+                } catch (e) {
+                    if (e.response?.data?.code === -4120) {
+                        try {
+                            const result = await this.placeAlgoOrder(slParams);
+                            return { success: true, order: result, type: 'algo' };
+                        } catch (algoErr) {
+                            return { success: false, error: algoErr };
+                        }
+                    } else {
+                        return { success: false, error: e };
+                    }
                 }
-            } else {
-                console.error(`[TP FAILED] ${symbol}`, e.response?.data || e.message);
-            }
+            })(),
+            (async () => {
+                try {
+                    const result = await this.placeOrder(tpParams);
+                    return { success: true, order: result, type: 'regular' };
+                } catch (e) {
+                    if (e.response?.data?.code === -4120) {
+                        try {
+                            const result = await this.placeAlgoOrder(tpParams);
+                            return { success: true, order: result, type: 'algo' };
+                        } catch (algoErr) {
+                            return { success: false, error: algoErr };
+                        }
+                    } else {
+                        return { success: false, error: e };
+                    }
+                }
+            })()
+        ]);
+        
+        // Extract results from Promise.allSettled
+        if (slResult.status === 'fulfilled' && slResult.value.success) {
+            slOrder = slResult.value.order;
+        }
+        if (tpResult.status === 'fulfilled' && tpResult.value.success) {
+            tpOrder = tpResult.value.order;
         }
         
         // Fail if both SL and TP failed (position unprotected)
         if (!slOrder && !tpOrder) {
             throw new Error('Both TP and SL orders failed - position has no protection');
-        }
-        
-        // Warn if only TP failed (SL still protects)
-        if (!tpOrder) {
-            console.warn(`[WARNING] TP failed but SL is active for ${symbol}`);
         }
         
         return {
@@ -389,113 +405,6 @@ const trading = {
             takeProfitPrice,
             stopLossPrice
         };
-    },
-    
-    async marketSell(symbol, quantity, positionSide = 'BOTH') {
-        return await this.placeOrder({
-            symbol,
-            side: 'SELL',
-            type: 'MARKET',
-            positionSide,
-            quantity
-        });
-    },
-    
-    async limitBuy(symbol, quantity, price, positionSide = 'BOTH', timeInForce = 'GTC') {
-        return await this.placeOrder({
-            symbol,
-            side: 'BUY',
-            type: 'LIMIT',
-            positionSide,
-            quantity,
-            price,
-            timeInForce
-        });
-    },
-    
-    async cancelOrder(symbol, orderId) {
-        return await makeRequest('DELETE', '/fapi/v1/order', { symbol, orderId }, true);
-    },
-    
-    async getOpenOrders(symbol = null) {
-        const params = symbol ? { symbol } : {};
-        return await makeRequest('GET', '/fapi/v1/openOrders', params, true);
-    },
-    
-    async closePosition(symbol, positionSide = 'BOTH') {
-        const positions = await account.getPositionInfo(symbol);
-        const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
-        
-        if (!position || parseFloat(position.positionAmt) === 0) {
-            throw new Error(`No open position found for ${symbol} ${positionSide}`);
-        }
-        
-        const positionAmt = parseFloat(position.positionAmt);
-        const side = positionAmt > 0 ? 'SELL' : 'BUY';
-        const quantity = Math.abs(positionAmt);
-        
-        return await this.placeOrder({
-            symbol,
-            side,
-            type: 'MARKET',
-            positionSide,
-            quantity,
-            reduceOnly: true
-        });
-    },
-    
-    /**
-     * Place Stop Loss Order (STOP_MARKET)
-     * Closes position at market price when stop price is hit
-     */
-    async stopLoss(symbol, stopPrice, positionSide = 'BOTH') {
-        // Get current position to determine quantity
-        const positions = await account.getPositionInfo(symbol);
-        const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
-        
-        if (!position || parseFloat(position.positionAmt) === 0) {
-            throw new Error(`No open position for ${symbol} ${positionSide}`);
-        }
-        
-        const quantity = Math.abs(parseFloat(position.positionAmt));
-        
-        return await this.placeOrder({
-            symbol,
-            side: 'SELL',
-            type: 'STOP_MARKET',
-            positionSide,
-            stopPrice,
-            quantity,
-            workingType: 'MARK_PRICE',
-            reduceOnly: true
-        });
-    },
-    
-    /**
-     * Place Take Profit Order (TAKE_PROFIT_MARKET)
-     * Closes position at market price when take profit price is hit
-     */
-    async takeProfit(symbol, takeProfitPrice, positionSide = 'BOTH') {
-        // Get current position to determine quantity
-        const positions = await account.getPositionInfo(symbol);
-        const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
-        
-        if (!position || parseFloat(position.positionAmt) === 0) {
-            throw new Error(`No open position for ${symbol} ${positionSide}`);
-        }
-        
-        const quantity = Math.abs(parseFloat(position.positionAmt));
-        
-        return await this.placeOrder({
-            symbol,
-            side: 'SELL',
-            type: 'TAKE_PROFIT_MARKET',
-            positionSide,
-            stopPrice: takeProfitPrice,
-            quantity,
-            workingType: 'MARK_PRICE',
-            reduceOnly: true
-        });
     }
 };
 
@@ -547,28 +456,10 @@ module.exports = {
     trading,
     utils,
     
-    // Backward compatibility exports
-    testConnectivity: marketData.testConnectivity,
-    getServerTime: marketData.getServerTime,
+    // Essential exports only
     getPrice: marketData.getPrice,
-    get24hrTicker: marketData.get24hrTicker,
-    getOrderBook: marketData.getOrderBook,
     getExchangeInfo: marketData.getExchangeInfo,
-    getBalance: account.getBalance,
     getPositionInfo: account.getPositionInfo,
     changeInitialLeverage: account.changeInitialLeverage,
-    changeMarginType: account.changeMarginType,
-    placeOrder: trading.placeOrder.bind(trading),
-    placeAlgoOrder: trading.placeAlgoOrder.bind(trading),
-    marketBuy: trading.marketBuy.bind(trading),
-    marketSell: trading.marketSell.bind(trading),
-    limitBuy: trading.limitBuy.bind(trading),
-    cancelOrder: trading.cancelOrder,
-    getOpenOrders: trading.getOpenOrders,
-    closePosition: trading.closePosition.bind(trading),
-    stopLoss: trading.stopLoss.bind(trading),
-    takeProfit: trading.takeProfit.bind(trading),
-    getSymbolPrecision: utils.getSymbolPrecision,
-    formatQuantity: utils.formatQuantity,
-    formatPrice: utils.formatPrice
+    getSymbolPrecision: utils.getSymbolPrecision
 };
