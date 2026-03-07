@@ -1,8 +1,21 @@
 const axios = require('axios');
 const crypto = require('crypto');
+const https = require('https');
 const config = require('../../config/config');
 const storage = require('../storage');
 const telegram = require('../notifications');
+
+const httpClient = axios.create({
+    timeout: 3000,
+    httpsAgent: new https.Agent({
+        keepAlive: true,
+        maxSockets: 100
+    }),
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json'
+    }
+});
 
 /**
  * Upbit Announcements Monitor
@@ -11,19 +24,14 @@ const telegram = require('../notifications');
 class UpbitMonitor {
     constructor() {
         this.config = config.exchanges.upbit;
+        this.lastNoticeId = null;
     }
     
     async fetchAnnouncements() {
         try {
-            const url = `${this.config.apiUrl}?os=web&page=1&per_page=20&category=trade`;
+            const url = `${this.config.apiUrl}?os=web&page=1&per_page=1&category=trade`;
             
-            const response = await axios.get(url, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json'
-                },
-                timeout: 10000
-            });
+            const response = await httpClient.get(url);
             
             if (response.data.success) {
                 const notices = response.data.data.notices;
@@ -45,14 +53,19 @@ class UpbitMonitor {
     }
     
     extractToken(title) {
+        const slashMarketMatch = title.match(/\(([A-Z]{2,10})\s*\/\s*(KRW|BTC|USDT)\)/i);
+        if (slashMarketMatch) {
+            return slashMarketMatch[1].toUpperCase();
+        }
+
         const match = title.match(/\(([A-Z]{2,10})\)/);
         if (match) {
-            return match[1];
+            return match[1].toUpperCase();
         }
         
         const uppercaseMatch = title.match(/\b([A-Z]{2,10})\b/);
         if (uppercaseMatch) {
-            return uppercaseMatch[1];
+            return uppercaseMatch[1].toUpperCase();
         }
         
         return null;
@@ -93,8 +106,8 @@ class UpbitMonitor {
         const token = this.extractToken(title);
         const tokens = token ? [token] : [];
         
-        const date = new Date(listed_at);
-        const formattedDate = date.toLocaleString('en-US', {
+        const releaseDate = typeof listed_at === 'number' ? listed_at : new Date(listed_at).getTime();
+        const formattedDate = new Date(listed_at).toLocaleString('en-US', {
             timeZone: 'Asia/Seoul',
             hour12: false
         }) + ' (KST)';
@@ -120,7 +133,7 @@ class UpbitMonitor {
             title,
             url,
             symbol,
-            releaseDate: new Date(listed_at).getTime(),
+            releaseDate,
             tokens,
             formattedDate,
             metadata,
@@ -138,30 +151,34 @@ class UpbitMonitor {
         
         try {
             const articles = await this.fetchAnnouncements();
-            
-            for (const article of articles) {
-                processed++;
-                const announcement = await this.processAnnouncement(article);
-                
-                if (announcement) {
-                    const detectionTime = new Date();
-                    announcement._detectionTime = detectionTime;
-                    latestAnnouncement = announcement;
-                    
-                    sent++;
-                    
-                    // Store with detailed metadata including detection timestamp
-                    storage.add(announcement.hash, announcement.metadata, 'UPBIT');
-                    storage.saveUpbit().catch(err => {});
-                    
-                    // Mark for auto-trade if it's a listing
-                    if (announcement._shouldTrade) {
-                        latestListing = announcement;
-                    }
-                    
-                    if (sent > 1) {
-                        await new Promise(resolve => setTimeout(resolve, 50));
-                    }
+
+            const article = articles[0];
+            if (!article) {
+                return { processed, sent, announcement: latestListing, latestAnnouncement };
+            }
+
+            if (this.lastNoticeId && String(article.id) === String(this.lastNoticeId)) {
+                return { processed, sent, announcement: latestListing, latestAnnouncement };
+            }
+
+            this.lastNoticeId = article.id;
+
+            processed = 1;
+            const announcement = await this.processAnnouncement(article);
+
+            if (announcement) {
+                const detectionTime = new Date();
+                announcement._detectionTime = detectionTime;
+                latestAnnouncement = announcement;
+                sent = 1;
+
+                // Store with detailed metadata including detection timestamp
+                storage.add(announcement.hash, announcement.metadata, 'UPBIT');
+                await storage.saveUpbit().catch(() => {});
+
+                // Mark for auto-trade if it's a listing
+                if (announcement._shouldTrade) {
+                    latestListing = announcement;
                 }
             }
         } catch (error) {

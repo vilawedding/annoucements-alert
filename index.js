@@ -135,29 +135,7 @@ async function main() {
     
     // Validate configuration
     if (!config.telegram.botToken || !config.telegram.chatId) {
-        console.error(`
-    ❌ CONFIGURATION ERROR
-    ======================
-    Please configure the following in .env file:
-    
-    TELEGRAM_BOT_TOKEN=your_bot_token_here
-    TELEGRAM_CHAT_ID=your_chat_id_here
-    
-    Optional configuration:
-    BINANCE_ENABLED=true           # Enable Binance monitoring
-    UPBIT_ENABLED=true             # Enable Upbit monitoring
-    BINANCE_INTERVAL=500           # Binance check interval in ms
-    UPBIT_INTERVAL=500             # Upbit check interval in ms
-    
-    Auto-trading configuration:
-    AUTO_TRADE_ENABLED=true        # Enable auto-trading
-    AUTO_TRADE_UPBIT_LISTING=true  # Trade on Upbit listings
-    AUTO_TRADE_AMOUNT=10           # Trade amount in USDT
-    AUTO_TRADE_LEVERAGE=5          # Leverage for futures
-    BINANCE_API_KEY=...            # Required for auto-trading
-    BINANCE_API_SECRET=...         # Required for auto-trading
-    BINANCE_USE_TESTNET=true       # Use testnet for safety
-        `);
+        console.error(`❌ CONFIGURATION ERROR`);
         process.exit(1);
     }
     
@@ -183,5 +161,6 @@ async function main() {
 
 // ==================== START THE BOT ====================
 main().catch(error => {
+    console.error(`❌ FATAL ERROR: ${error.message}`);
     process.exit(1);
 });

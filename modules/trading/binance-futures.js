@@ -16,6 +16,7 @@ const API_SECRET = config.binanceFutures.apiSecret;
 
 // Server time cache for ultra-fast execution (avoid repeated server time calls)
 let serverTimeCache = { time: null, lastFetch: 0, offsetMs: 0 };
+let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
 
 // Keep-alive client for lower latency on repeated requests
 const httpClient = axios.create({
@@ -129,6 +130,34 @@ const marketData = {
     
     async getExchangeInfo() {
         return await makeRequest('GET', '/fapi/v1/exchangeInfo');
+    },
+
+    async getTradableSymbols(forceRefresh = false) {
+        const now = Date.now();
+        const cacheFresh = tradableSymbolsCache.symbols && (now - tradableSymbolsCache.lastFetch) < 10000;
+
+        if (!forceRefresh && cacheFresh) {
+            return tradableSymbolsCache.symbols;
+        }
+
+        const exchangeInfo = await this.getExchangeInfo();
+        const symbols = new Set(
+            (exchangeInfo?.symbols || [])
+                .filter(s => s && s.status === 'TRADING' && s.contractType === 'PERPETUAL')
+                .map(s => s.symbol)
+        );
+
+        tradableSymbolsCache = {
+            symbols,
+            lastFetch: now
+        };
+
+        return symbols;
+    },
+
+    async isSymbolTradable(symbol, forceRefresh = false) {
+        const symbols = await this.getTradableSymbols(forceRefresh);
+        return symbols.has(symbol);
     }
 };
 
@@ -459,6 +488,7 @@ module.exports = {
     // Essential exports only
     getPrice: marketData.getPrice,
     getExchangeInfo: marketData.getExchangeInfo,
+    isSymbolTradable: marketData.isSymbolTradable.bind(marketData),
     getPositionInfo: account.getPositionInfo,
     changeInitialLeverage: account.changeInitialLeverage,
     getSymbolPrecision: utils.getSymbolPrecision

@@ -1,8 +1,21 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const cheerio = require('cheerio');
+const https = require('https');
 const config = require('../../config/config');
 const storage = require('../storage');
+
+const httpClient = axios.create({
+    timeout: 5000,
+    httpsAgent: new https.Agent({
+        keepAlive: true,
+        maxSockets: 100
+    }),
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json'
+    }
+});
 
 /**
  * Binance Announcements Monitor
@@ -20,18 +33,14 @@ class BinanceMonitor {
         try {
             const url = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query';
 
-            const response = await axios.get(url, {
+            const response = await httpClient.get(url, {
                 params: {
                     type: 1,
                     pageNo: 1,
-                    pageSize: 20,
+                    pageSize: 5,
                     catalogId
                 },
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json'
-                },
-                timeout: 5000
+                timeout: 3500
             });
             
             if (response.data.success && response.data.data?.catalogs?.length > 0) {
@@ -61,30 +70,43 @@ class BinanceMonitor {
         try {
             const url = `https://www.binance.com/en/support/announcement/${articleCode}`;
             
-            const response = await axios.get(url, {
-                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            const response = await httpClient.get(url, {
                 timeout: 15000
             });
-            
-            const $ = cheerio.load(response.data);
+
+            const pageHtml = String(response.data || '');
             const tokens = new Set();
-            
-            const contentSelectors = ['.article-body', '.htmlcontent', 'article'];
-            
             let content = '';
-            for (const selector of contentSelectors) {
-                content = $(selector).html() || '';
-                if (content) break;
+
+            const jsonMatch = pageHtml.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+            if (jsonMatch && jsonMatch[1]) {
+                try {
+                    const json = JSON.parse(jsonMatch[1]);
+                    content =
+                        json?.props?.pageProps?.article?.content ||
+                        json?.props?.pageProps?.data?.article?.content ||
+                        '';
+                } catch (_) {}
             }
-            
+
+            if (!content) {
+                const $page = cheerio.load(pageHtml);
+                const contentSelectors = ['.article-body', '.htmlcontent', 'article'];
+
+                for (const selector of contentSelectors) {
+                    content = $page(selector).html() || '';
+                    if (content) break;
+                }
+            }
+
             if (!content) return [];
+
+            const $ = cheerio.load(content);
+            const textContent = $.text().replace(/\s+/g, ' ');
             
-            const textContent = $(content).text();
-            
-            const slashPairs = textContent.match(/([A-Z]{2,10})\s*\/\s*(USDT|BUSD|BTC|ETH|BNB)/gi) || [];
-            slashPairs.forEach(pair => {
-                const token = pair.split('/')[0].trim();
-                if (token.length >= 2) tokens.add(token);
+            const slashPairs = [...textContent.matchAll(/([A-Z]{2,10})\s*\/\s*(USDT|BUSD|BTC|ETH|BNB|TUSD|FDUSD)/gi)];
+            slashPairs.forEach(m => {
+                if (m[1] && m[1].length >= 2) tokens.add(m[1].toUpperCase());
             });
             
             const usdtPairs = textContent.match(/([A-Z]{2,10})USDT/gi) || [];
@@ -102,19 +124,12 @@ class BinanceMonitor {
     
     extractTokens(title) {
         const tokens = new Set();
-        
-        const parenthesizedPattern = /\(([A-Z]{1,10})\)/g;
+
+        const unifiedPattern = /\(([A-Z]{2,10})\)|([A-Z]{2,10})(USDT|BUSD|BTC|ETH|BNB|TUSD|FDUSD)(?![a-z])|([A-Z]{2,10})\s*\/\s*(USDT|BUSD|BTC|ETH|BNB|TUSD|FDUSD)/gi;
         let match;
-        
-        while ((match = parenthesizedPattern.exec(title)) !== null) {
-            if (match[1].length >= 2) {
-                tokens.add(match[1]);
-            }
-        }
-        
-        const pairPattern = /([A-Z]{2,10})(USDT|BUSD|BTC|ETH|BNB|TUSD|FDUSD)(?![a-z])/gi;
-        while ((match = pairPattern.exec(title)) !== null) {
-            tokens.add(match[1]);
+        while ((match = unifiedPattern.exec(title)) !== null) {
+            const token = match[1] || match[2] || match[4];
+            if (token) tokens.add(token.toUpperCase());
         }
         
         return Array.from(tokens);
@@ -198,11 +213,13 @@ class BinanceMonitor {
         // Prepare metadata for storage with millisecond precision
         const detectionTime = Date.now();
         const primaryToken = validTokens.length > 0 ? validTokens[0] : null;
+        const symbols = validTokens.map(token => `${token}USDT`);
         const symbol = primaryToken ? `${primaryToken}USDT` : null;
         const signals = this.generateSignals(validTokens, category);
         
         const metadata = {
             symbol,
+            symbols,
             title,
             link: url,
             exchange: 'BINANCE',
@@ -219,6 +236,7 @@ class BinanceMonitor {
             title,
             url,
             symbol,
+            symbols,
             releaseDate,
             tokens: validTokens,
             signals,
@@ -236,25 +254,54 @@ class BinanceMonitor {
         let processed = 0, sent = 0, latestAnnouncement = null;
         
         try {
-            for (const catalogId of this.catalogIds) {
+            const catalogResults = await Promise.all(
+                this.catalogIds.map(catalogId => this.fetchAnnouncements(catalogId))
+            );
+
+            for (const catalogData of catalogResults) {
                 try {
-                    const catalogData = await this.fetchAnnouncements(catalogId);
-                    
+                    const unseenArticles = [];
+
                     for (const article of catalogData.articles) {
-                        processed++;
-                        const announcement = await this.processAnnouncement(article);
-                        
+                        const articleHash = crypto
+                            .createHash('md5')
+                            .update(`BINANCE-${article.catalogId}-${article.id}-${article.code}`)
+                            .digest('hex');
+
+                        // API usually returns latest first. Stop when hitting first known item.
+                        if (storage.has(articleHash, 'BINANCE')) {
+                            break;
+                        }
+
+                        unseenArticles.push(article);
+                    }
+
+                    if (unseenArticles.length === 0) {
+                        continue;
+                    }
+
+                    const announcements = await Promise.all(
+                        unseenArticles.map(article => this.processAnnouncement(article))
+                    );
+
+                    processed += unseenArticles.length;
+
+                    for (const announcement of announcements) {
                         if (announcement) {
                             sent++;
-                            latestAnnouncement = announcement;
+                            if (!latestAnnouncement) {
+                                latestAnnouncement = announcement;
+                            }
                             storage.add(announcement.hash, announcement.metadata, 'BINANCE');
-                            await storage.saveBinance();
-                            await new Promise(resolve => setTimeout(resolve, 100));
                         }
                     }
                 } catch (error) {
-                    console.error(`[BINANCE] Error processing catalog ${catalogId}: ${error.message}`);
+                    console.error(`[BINANCE] Error processing catalog: ${error.message}`);
                 }
+            }
+
+            if (sent > 0) {
+                await storage.saveBinance();
             }
         } catch (error) {
             console.error(`[BINANCE] Error checking announcements: ${error.message}`);
