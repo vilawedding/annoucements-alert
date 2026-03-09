@@ -37,7 +37,6 @@ class LightningAutoTrader {
             } catch (error) {
                 console.error(`[TELEGRAM] send failed: ${error.message}`);
             }
-            await new Promise(resolve => setTimeout(resolve, 100));
         }
         this.isSendingTelegram = false;
     }
@@ -194,18 +193,15 @@ class LightningAutoTrader {
                 
                 tradeResults.push(result);
                 
-                // Record order execution in storage with millisecond precision
+                // Record order execution in storage with millisecond precision (non-blocking)
                 if (announcementHash) {
                     const sourceExchange = announcement.exchange === 'BINANCE' ? 'BINANCE' : 'UPBIT';
                     storage.recordOrderExecution(announcementHash, orderExecutionTime, sourceExchange);
+                    // Save async without blocking trade flow
                     if (sourceExchange === 'BINANCE') {
-                        await storage.saveBinance().catch((error) => {
-                            console.error(`[STORAGE] saveBinance failed: ${error.message}`);
-                        });
+                        storage.saveBinance().catch(() => {});
                     } else {
-                        await storage.saveUpbit().catch((error) => {
-                            console.error(`[STORAGE] saveUpbit failed: ${error.message}`);
-                        });
+                        storage.saveUpbit().catch(() => {});
                     }
                 }
                 

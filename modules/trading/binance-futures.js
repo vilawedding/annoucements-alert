@@ -20,10 +20,11 @@ let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
 
 // Keep-alive client for lower latency on repeated requests
 const httpClient = axios.create({
-    timeout: 10000,
+    timeout: 5000,
     httpsAgent: new https.Agent({
         keepAlive: true,
-        maxSockets: 50
+        maxSockets: 100,
+        keepAliveMsecs: 1000
     })
 });
 
@@ -88,7 +89,7 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
             'X-MBX-APIKEY': API_KEY,
             'Content-Type': 'application/x-www-form-urlencoded'
         },
-        timeout: 10000,
+        timeout: 5000,
         paramsSerializer: (params) => buildQueryStringForUrl(params)
     };
     

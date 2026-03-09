@@ -172,9 +172,9 @@ class UpbitMonitor {
                 latestAnnouncement = announcement;
                 sent = 1;
 
-                // Store with detailed metadata including detection timestamp
+                // Store with detailed metadata including detection timestamp (non-blocking)
                 storage.add(announcement.hash, announcement.metadata, 'UPBIT');
-                await storage.saveUpbit().catch(() => {});
+                storage.saveUpbit().catch(() => {});
 
                 // Mark for auto-trade if it's a listing
                 if (announcement._shouldTrade) {
