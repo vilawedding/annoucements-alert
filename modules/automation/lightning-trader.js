@@ -99,19 +99,29 @@ class LightningAutoTrader {
     /**
      * Execute trade with maximum speed
      */
-                async executeLight(announcement) {
+    async executeLight(announcement) {
 
         if (!this.config.enabled) return null;
-                if (!announcement) return null;
-        if (announcement.exchange !== 'UPBIT' || announcement.category !== 'LISTING') return null;
-        if (!this.config.upbitListing) return null;
+        if (!announcement) return null;
+
+        const exchange = String(announcement.exchange || '').toUpperCase();
+        const category = String(announcement.category || '').toUpperCase();
+
+        if (exchange === 'UPBIT') {
+            if (!this.config.upbitListing) return null;
+            if (category !== 'LISTING') return null;
+        } else if (exchange === 'BINANCE') {
+            if (!this.config.binanceListing) return null;
+            if (!['LISTING', 'NEW_PAIRS'].includes(category)) return null;
+        } else {
+            return null;
+        }
         
         const tokens = (announcement.tokens && announcement.tokens.length > 0)
             ? announcement.tokens
             : this.extractTokensFast(announcement.title || '');
         if (tokens.length === 0) return null;
 
-        const exchange = String(announcement.exchange || '').toUpperCase();
         const takeProfitPercent = exchange === 'BINANCE'
             ? this.config.takeProfitPercentBinance
             : this.config.takeProfitPercentUpbit;

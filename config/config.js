@@ -39,6 +39,7 @@ module.exports = {
     autoTrade: {
         enabled: process.env.AUTO_TRADE_ENABLED === 'true',
         upbitListing: process.env.AUTO_TRADE_UPBIT_LISTING !== 'false',
+        binanceListing: process.env.AUTO_TRADE_BINANCE_LISTING !== 'false',
         amount: parseFloat(process.env.AUTO_TRADE_AMOUNT) || 10,
         leverage: parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5,
         stopLossPercent: parseFloat(process.env.AUTO_TRADE_SL_PERCENT) || 1.0,

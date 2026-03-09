@@ -242,7 +242,8 @@ class BinanceMonitor {
             signals,
             formattedDate,
             metadata,
-            detectedAt: detectionTime
+            detectedAt: detectionTime,
+            _shouldTrade: category === 'LISTING' || category === 'NEW_PAIRS'
         };
     }
     

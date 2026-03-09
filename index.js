@@ -70,6 +70,18 @@ function formatTime(date) {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
+function startHeartbeatLogger() {
+    const HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+    const logHeartbeat = () => {
+        const stats = storage.getStats();
+        const uptimeMinutes = Math.floor(process.uptime() / 60);
+        console.log(`💓 [HEARTBEAT] ${formatTime(new Date())} | uptime=${uptimeMinutes}m | total=${stats.total} | binance=${stats.binance} | upbit=${stats.upbit}`);
+    };
+
+    logHeartbeat(); // log immediately at startup
+    setInterval(logHeartbeat, HEARTBEAT_INTERVAL_MS);
+}
+
 // ==================== MONITOR RUNNERS ====================
 async function runBinanceMonitor() {
     while (true) {
@@ -79,6 +91,27 @@ async function runBinanceMonitor() {
                 const a = result.latestAnnouncement;
                 const tokenText = a.tokens && a.tokens.length > 0 ? a.tokens.join(',') : 'N/A';
                 console.log(`📩 [BINANCE] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title}`);
+
+                if (config.autoTrade.enabled && a._shouldTrade) {
+                    const tradeStartTime = Date.now();
+                    const detectionTime = a.detectedAt ? new Date(a.detectedAt) : new Date();
+
+                    const tradeResults = await lightningTrader.executeLight(a);
+
+                    if (tradeResults && tradeResults.length > 0) {
+                        const tradeEndTime = Date.now();
+                        const tradeDuration = tradeEndTime - tradeStartTime;
+                        const totalDuration = tradeEndTime - detectionTime.getTime();
+                        const successCount = tradeResults.filter(r => r.success).length;
+                        const endTime = new Date();
+                        const orderText = tradeResults
+                            .filter(r => r.success)
+                            .map(r => `${r.symbol}:entry=${r.entryPrice},qty=${r.executedQty || r.quantity},sl=${r.stopLoss},tp=${r.takeProfit},slId=${r.stopLossOrderId || 'N/A'},tpId=${r.takeProfitOrderId || 'N/A'}`)
+                            .join(' || ');
+
+                        console.log(`✅ [TRADE] ${successCount}/${tradeResults.length} | ${tradeDuration}ms | ${totalDuration}ms | ${formatTime(detectionTime)} → ${formatTime(endTime)} | ${orderText || 'NO_SUCCESS_ORDER'}`);
+                    }
+                }
             }
         } catch (error) {
             // Silent fail
@@ -141,6 +174,7 @@ async function main() {
     
     await storage.loadAll();
     startHealthServer();
+    startHeartbeatLogger();
     
     if (config.exchanges.binance.enabled) {
         runBinanceMonitor().catch(() => {});
