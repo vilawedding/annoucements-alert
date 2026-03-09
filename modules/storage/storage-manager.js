@@ -21,34 +21,19 @@ const config = require('../../config/config');
 
 class StorageManager {
     constructor() {
-        this.mainFile = path.join(__dirname, '../../', config.storage.mainFile);
         this.binanceFile = path.join(__dirname, '../../', config.storage.binanceFile);
         this.upbitFile = path.join(__dirname, '../../', config.storage.upbitFile);
         
         // Changed from Set to Object to store detailed metadata
-        this.sentAnnouncements = {};
         this.binanceSentAnnouncements = {};
         this.upbitSentAnnouncements = {};
     }
     
     async loadAll() {
         await Promise.all([
-            this.loadMain(),
             this.loadBinance(),
             this.loadUpbit()
         ]);
-    }
-    
-    async loadMain() {
-        try {
-            const data = await fs.readFile(this.mainFile, 'utf8');
-            const parsed = JSON.parse(data);
-            this.sentAnnouncements = parsed || {};
-            console.log(`✅ Loaded ${Object.keys(this.sentAnnouncements).length} sent announcements`);
-        } catch (error) {
-            console.log('ℹ️ No main storage found, starting fresh');
-            this.sentAnnouncements = {};
-        }
     }
     
     async loadBinance() {
@@ -77,19 +62,9 @@ class StorageManager {
     
     async saveAll() {
         await Promise.all([
-            this.saveMain(),
             this.saveBinance(),
             this.saveUpbit()
         ]);
-    }
-    
-    async saveMain() {
-        try {
-            const data = JSON.stringify(this.sentAnnouncements, null, 2);
-            await fs.writeFile(this.mainFile, data, 'utf8');
-        } catch (error) {
-            console.error('❌ Error saving main storage:', error.message);
-        }
     }
     
     async saveBinance() {
@@ -119,7 +94,7 @@ class StorageManager {
         } else if (exchange === 'UPBIT') {
             return hash in this.upbitSentAnnouncements;
         }
-        return hash in this.sentAnnouncements;
+        return false;
     }
     
     /**
@@ -139,8 +114,6 @@ class StorageManager {
             latency: details.latency || null               // ms from detection to order
         };
         
-        this.sentAnnouncements[hash] = detailedEntry;
-        
         if (exchange === 'BINANCE') {
             this.binanceSentAnnouncements[hash] = detailedEntry;
         } else if (exchange === 'UPBIT') {
@@ -157,10 +130,6 @@ class StorageManager {
         
         const update = { orderedAt, latency };
         
-        if (hash in this.sentAnnouncements) {
-            this.sentAnnouncements[hash] = { ...this.sentAnnouncements[hash], ...update };
-        }
-        
         if (exchange === 'BINANCE' && hash in this.binanceSentAnnouncements) {
             this.binanceSentAnnouncements[hash] = { ...this.binanceSentAnnouncements[hash], ...update };
         } else if (exchange === 'UPBIT' && hash in this.upbitSentAnnouncements) {
@@ -176,8 +145,6 @@ class StorageManager {
             return this.binanceSentAnnouncements[hash].detectedAt;
         } else if (exchange === 'UPBIT' && hash in this.upbitSentAnnouncements) {
             return this.upbitSentAnnouncements[hash].detectedAt;
-        } else if (hash in this.sentAnnouncements) {
-            return this.sentAnnouncements[hash].detectedAt;
         }
         return null;
     }
@@ -190,8 +157,6 @@ class StorageManager {
             return this.binanceSentAnnouncements[hash];
         } else if (exchange === 'UPBIT' && hash in this.upbitSentAnnouncements) {
             return this.upbitSentAnnouncements[hash];
-        } else if (hash in this.sentAnnouncements) {
-            return this.sentAnnouncements[hash];
         }
         return null;
     }
@@ -201,7 +166,7 @@ class StorageManager {
      */
     getStats() {
         return {
-            total: Object.keys(this.sentAnnouncements).length,
+            total: Object.keys(this.binanceSentAnnouncements).length + Object.keys(this.upbitSentAnnouncements).length,
             binance: Object.keys(this.binanceSentAnnouncements).length,
             upbit: Object.keys(this.upbitSentAnnouncements).length
         };
@@ -216,7 +181,7 @@ class StorageManager {
         } else if (exchange === 'UPBIT') {
             return this.upbitSentAnnouncements;
         }
-        return this.sentAnnouncements;
+        return { ...this.binanceSentAnnouncements, ...this.upbitSentAnnouncements };
     }
 }
 

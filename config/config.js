@@ -65,7 +65,6 @@ module.exports = {
     
     // Storage Configuration
     storage: {
-        mainFile: 'data/sent_announcements.json',
         binanceFile: 'data/sent_announcements_binance.json',
         upbitFile: 'data/sent_announcements_upbit.json'
     },
