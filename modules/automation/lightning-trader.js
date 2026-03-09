@@ -110,8 +110,13 @@ class LightningAutoTrader {
             if (!this.config.upbitListing) return null;
             if (category !== 'LISTING') return null;
         } else if (exchange === 'BINANCE') {
-            if (!this.config.binanceListing) return null;
-            if (!['LISTING', 'NEW_PAIRS'].includes(category)) return null;
+            if (category === 'DELISTING') {
+                if (!this.config.binanceDelisting) return null;
+            } else if (['LISTING', 'NEW_PAIRS'].includes(category)) {
+                if (!this.config.binanceListing) return null;
+            } else {
+                return null;
+            }
         } else {
             return null;
         }
@@ -125,6 +130,7 @@ class LightningAutoTrader {
             ? this.config.takeProfitPercentBinance
             : this.config.takeProfitPercentUpbit;
         
+        const isShort = category === 'DELISTING';
         const executionStartTime = Date.now();
         const tradeResults = [];
         const announcementHash = announcement.hash;
@@ -158,19 +164,26 @@ class LightningAutoTrader {
                     console.warn(`[LEVERAGE] ${symbol} set failed: ${error.message}`);
                 });
                 
-                // Place BUY order with TP/SL using fast retry (listing race condition)
-                const order = await this.sniperRetry(
-                    () => this.binance.trading.marketBuyWithTPSL(
+                // Place order with TP/SL using fast retry
+                const tradeFn = isShort
+                    ? () => this.binance.trading.marketSellWithTPSL(
                         symbol,
                         this.config.amount,
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
                         precision
-                    ),
-                    20,
-                    50
-                );
+                    )
+                    : () => this.binance.trading.marketBuyWithTPSL(
+                        symbol,
+                        this.config.amount,
+                        takeProfitPercent,
+                        this.config.stopLossPercent,
+                        'BOTH',
+                        precision
+                    );
+
+                const order = await this.sniperRetry(tradeFn, 20, 50);
                 const tradeDuration = Date.now() - tradeStartTime;
                 
                 const result = {

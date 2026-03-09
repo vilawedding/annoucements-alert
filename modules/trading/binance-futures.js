@@ -240,6 +240,17 @@ const trading = {
         });
     },
 
+    async marketSell(symbol, quantity, positionSide = 'BOTH') {
+        return await this.placeOrder({
+            symbol,
+            side: 'SELL',
+            type: 'MARKET',
+            positionSide,
+            quantity,
+            newOrderRespType: 'RESULT'
+        });
+    },
+
     /**
      * Place Algo Order (for symbols that require it)
      * Used when regular /fapi/v1/order returns -4120 error
@@ -422,6 +433,154 @@ const trading = {
         }
         
         // Fail if both SL and TP failed (position unprotected)
+        if (!slOrder && !tpOrder) {
+            throw new Error('Both TP and SL orders failed - position has no protection');
+        }
+        
+        return {
+            ...order,
+            quantity,
+            entryPrice,
+            takeProfitOrderId: tpOrder?.orderId ?? tpOrder?.algoId,
+            stopLossOrderId: slOrder?.orderId ?? slOrder?.algoId,
+            takeProfitPrice,
+            stopLossPrice
+        };
+    },
+
+    /**
+     * Market Sell (SHORT) with Take Profit and Stop Loss
+     * For delisting scenarios - reversed TP/SL logic
+     */
+    async marketSellWithTPSL(symbol, usdtAmount, tpPercent, slPercent, positionSide = 'BOTH', precision = null, options = {}) {
+        const { delayMs = 0 } = options;
+
+        if (!precision) {
+            precision = await utils.getSymbolPrecision(symbol);
+        }
+        
+        const priceData = await marketData.getPrice(symbol);
+        const currentPrice = parseFloat(priceData.price);
+        
+        if (currentPrice <= 0) throw new Error('Invalid price');
+        
+        const quantity = utils.formatQuantity(
+            usdtAmount / currentPrice,
+            precision.stepSize || precision.quantityPrecision
+        );
+        
+        // Place SELL order (SHORT)
+        const order = await this.marketSell(symbol, quantity, positionSide);
+        let entryPrice = parseFloat(order.avgPrice);
+
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+            try {
+                const positions = await account.getPositionInfo(symbol);
+                const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
+                const positionEntryPrice = position ? parseFloat(position.entryPrice) : NaN;
+                if (Number.isFinite(positionEntryPrice) && positionEntryPrice > 0) {
+                    entryPrice = positionEntryPrice;
+                }
+            } catch (_) {}
+        }
+
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+            entryPrice = currentPrice;
+        }
+        
+        // Calculate TP and SL prices (REVERSED for SHORT)
+        let takeProfitPrice = entryPrice * (1 - tpPercent / 100);  // TP below entry
+        let stopLossPrice = entryPrice * (1 + slPercent / 100);    // SL above entry
+        
+        takeProfitPrice = utils.formatPrice(takeProfitPrice, precision.tickSize || precision.pricePrecision);
+        stopLossPrice = utils.formatPrice(stopLossPrice, precision.tickSize || precision.pricePrecision);
+        
+        // Validate direction for SHORT position
+        const markPrice = currentPrice;
+        
+        if (stopLossPrice <= markPrice) {
+            throw new Error(`STOP_MARKET invalid for SHORT. stopLossPrice <= markPrice`);
+        }
+        
+        if (takeProfitPrice >= markPrice) {
+            throw new Error(`TAKE_PROFIT_MARKET invalid for SHORT. takeProfitPrice >= markPrice`);
+        }
+        
+        if (delayMs > 0) {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        let slOrder = null;
+        let tpOrder = null;
+        
+        // SL: BUY to close SHORT position when price goes UP
+        const slParams = {
+            symbol,
+            side: 'BUY',
+            type: 'STOP_MARKET',
+            positionSide,
+            stopPrice: stopLossPrice,
+            quantity,
+            workingType: 'MARK_PRICE',
+            reduceOnly: true
+        };
+        
+        // TP: BUY to close SHORT position when price goes DOWN
+        const tpParams = {
+            symbol,
+            side: 'BUY',
+            type: 'TAKE_PROFIT_MARKET',
+            positionSide,
+            stopPrice: takeProfitPrice,
+            quantity,
+            workingType: 'MARK_PRICE',
+            reduceOnly: true
+        };
+        
+        const [slResult, tpResult] = await Promise.allSettled([
+            (async () => {
+                try {
+                    const result = await this.placeOrder(slParams);
+                    return { success: true, order: result, type: 'regular' };
+                } catch (e) {
+                    if (e.response?.data?.code === -4120) {
+                        try {
+                            const result = await this.placeAlgoOrder(slParams);
+                            return { success: true, order: result, type: 'algo' };
+                        } catch (algoErr) {
+                            return { success: false, error: algoErr };
+                        }
+                    } else {
+                        return { success: false, error: e };
+                    }
+                }
+            })(),
+            (async () => {
+                try {
+                    const result = await this.placeOrder(tpParams);
+                    return { success: true, order: result, type: 'regular' };
+                } catch (e) {
+                    if (e.response?.data?.code === -4120) {
+                        try {
+                            const result = await this.placeAlgoOrder(tpParams);
+                            return { success: true, order: result, type: 'algo' };
+                        } catch (algoErr) {
+                            return { success: false, error: algoErr };
+                        }
+                    } else {
+                        return { success: false, error: e };
+                    }
+                }
+            })()
+        ]);
+        
+        if (slResult.status === 'fulfilled' && slResult.value.success) {
+            slOrder = slResult.value.order;
+        }
+        if (tpResult.status === 'fulfilled' && tpResult.value.success) {
+            tpOrder = tpResult.value.order;
+        }
+        
         if (!slOrder && !tpOrder) {
             throw new Error('Both TP and SL orders failed - position has no protection');
         }
