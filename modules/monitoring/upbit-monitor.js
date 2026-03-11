@@ -13,7 +13,10 @@ const httpClient = axios.create({
     }),
     headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
     }
 });
 
@@ -27,29 +30,89 @@ class UpbitMonitor {
         this.lastNoticeId = null;
     }
     
-    async fetchAnnouncements() {
+    async fetchAnnouncementsFromSource(os = 'web', includeCategory = true, timeout = 1200) {
         try {
-            const url = `${this.config.apiUrl}?os=web&page=1&per_page=1&category=trade`;
-            
-            const response = await httpClient.get(url);
-            
-            if (response.data.success) {
-                const notices = response.data.data.notices;
-                
-                return notices.map(notice => ({
-                    ...notice,
-                    exchange: 'UPBIT',
-                    title: notice.title,
-                    url: 'https://upbit.com/notice',
-                    releaseDate: new Date(notice.listed_at).getTime()
-                }));
-            }
-            
-            return [];
-            
+            const cacheBust = Date.now();
+            const categoryPart = includeCategory ? '&category=trade' : '';
+            const url = `${this.config.apiUrl}?os=${os}&page=1&per_page=5${categoryPart}&_=${cacheBust}`;
+
+            const response = await httpClient.get(url, { timeout });
+            if (!response.data?.success) return [];
+
+            const notices = response.data?.data?.notices || [];
+            return notices.map(notice => ({
+                ...notice,
+                exchange: 'UPBIT',
+                title: notice.title,
+                url: 'https://upbit.com/notice',
+                releaseDate: new Date(notice.listed_at).getTime()
+            }));
         } catch (error) {
             return [];
         }
+    }
+
+    getLatestArticle(articles) {
+        if (!Array.isArray(articles) || articles.length === 0) return null;
+
+        return articles.reduce((latest, current) => {
+            if (!latest) return current;
+
+            const latestId = Number(latest.id) || 0;
+            const currentId = Number(current.id) || 0;
+            if (currentId > latestId) return current;
+
+            const latestTime = new Date(latest.listed_at).getTime() || 0;
+            const currentTime = new Date(current.listed_at).getTime() || 0;
+            return currentTime > latestTime ? current : latest;
+        }, null);
+    }
+
+    async fetchFastestNewestArticle() {
+        const sources = [
+            { os: 'web', includeCategory: true, timeout: 900 },
+            { os: 'android', includeCategory: true, timeout: 900 },
+            { os: 'ios', includeCategory: true, timeout: 900 },
+            { os: 'web', includeCategory: false, timeout: 1200 }
+        ];
+
+        const lastId = this.lastNoticeId ? Number(this.lastNoticeId) : 0;
+
+        return await new Promise((resolve) => {
+            let pending = sources.length;
+            let resolved = false;
+            let best = null;
+
+            for (const source of sources) {
+                this.fetchAnnouncementsFromSource(source.os, source.includeCategory, source.timeout)
+                    .then((articles) => {
+                        const latest = this.getLatestArticle(articles);
+                        if (!latest) return;
+
+                        const latestId = Number(latest.id) || 0;
+
+                        if (!best) {
+                            best = latest;
+                        } else {
+                            const bestId = Number(best.id) || 0;
+                            if (latestId > bestId) best = latest;
+                        }
+
+                        if (!resolved && lastId > 0 && latestId > lastId) {
+                            resolved = true;
+                            resolve(latest);
+                        }
+                    })
+                    .catch(() => {})
+                    .finally(() => {
+                        pending -= 1;
+                        if (!resolved && pending === 0) {
+                            resolved = true;
+                            resolve(best);
+                        }
+                    });
+            }
+        });
     }
     
     extractToken(title) {
@@ -150,9 +213,10 @@ class UpbitMonitor {
         let processed = 0, sent = 0, latestListing = null, latestAnnouncement = null;
         
         try {
-            const articles = await this.fetchAnnouncements();
+            const apiCallStartedAtMs = Date.now();
+            const article = await this.fetchFastestNewestArticle();
+            const apiCallFinishedAtMs = Date.now();
 
-            const article = articles[0];
             if (!article) {
                 return { processed, sent, announcement: latestListing, latestAnnouncement };
             }
@@ -169,6 +233,10 @@ class UpbitMonitor {
             if (announcement) {
                 const detectionTime = new Date();
                 announcement._detectionTime = detectionTime;
+                announcement._apiCallStartedAt = new Date(apiCallStartedAtMs);
+                announcement._apiCallFinishedAt = new Date(apiCallFinishedAtMs);
+                announcement._apiFetchMs = apiCallFinishedAtMs - apiCallStartedAtMs;
+                announcement._apiToDetectMs = detectionTime.getTime() - apiCallStartedAtMs;
                 latestAnnouncement = announcement;
                 sent = 1;
 

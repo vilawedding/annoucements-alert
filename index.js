@@ -86,6 +86,7 @@ function startHeartbeatLogger() {
 // ==================== MONITOR RUNNERS ====================
 async function runBinanceMonitor() {
     while (true) {
+        const loopStart = Date.now();
         try {
             const result = await monitoring.binance.check();
             if (result?.latestAnnouncement) {
@@ -117,18 +118,25 @@ async function runBinanceMonitor() {
         } catch (error) {
             // Silent fail
         }
-        await new Promise(resolve => setTimeout(resolve, config.exchanges.binance.interval));
+        const elapsed = Date.now() - loopStart;
+        const waitMs = Math.max(0, config.exchanges.binance.interval - elapsed);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
     }
 }
 
 async function runUpbitMonitor() {
     while (true) {
+        const loopStart = Date.now();
         try {
             const result = await monitoring.upbit.check();
             if (result?.latestAnnouncement) {
                 const a = result.latestAnnouncement;
                 const tokenText = a.tokens && a.tokens.length > 0 ? a.tokens.join(',') : 'N/A';
-                console.log(`📩 [UPBIT] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title}`);
+                const apiStart = a._apiCallStartedAt ? formatTime(a._apiCallStartedAt) : 'N/A';
+                const apiEnd = a._apiCallFinishedAt ? formatTime(a._apiCallFinishedAt) : 'N/A';
+                const apiFetchMs = Number.isFinite(a._apiFetchMs) ? `${a._apiFetchMs}ms` : 'N/A';
+                const apiToDetectMs = Number.isFinite(a._apiToDetectMs) ? `${a._apiToDetectMs}ms` : 'N/A';
+                console.log(`📩 [UPBIT] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title} | apiStart=${apiStart} | apiEnd=${apiEnd} | fetch=${apiFetchMs} | api→detect=${apiToDetectMs}`);
             }
             
             // Trigger lightning-fast auto-trade if listing detected
@@ -155,7 +163,9 @@ async function runUpbitMonitor() {
         } catch (error) {
             // Silent fail
         }
-        await new Promise(resolve => setTimeout(resolve, config.exchanges.upbit.interval));
+        const elapsed = Date.now() - loopStart;
+        const waitMs = Math.max(0, config.exchanges.upbit.interval - elapsed);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
     }
 }
 

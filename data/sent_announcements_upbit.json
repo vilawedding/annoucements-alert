@@ -160,5 +160,14 @@
     "detectedAt": 1773063432576,
     "orderedAt": null,
     "latency": null
+  },
+  "505bf7c59b3896760e87f4b8f3a6742c": {
+    "symbol": "ICPUSDT",
+    "title": "인터넷컴퓨터(ICP) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1773219424770,
+    "orderedAt": null,
+    "latency": null
   }
 }
