@@ -17,6 +17,24 @@ const API_SECRET = config.binanceFutures.apiSecret;
 // Server time cache for ultra-fast execution (avoid repeated server time calls)
 let serverTimeCache = { time: null, lastFetch: 0, offsetMs: 0 };
 let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
+let isServerTimeSyncing = false;
+
+function syncServerTimeInBackground() {
+    if (isServerTimeSyncing) return;
+    isServerTimeSyncing = true;
+
+    marketData.getServerTime()
+        .then((serverTime) => {
+            const now = Date.now();
+            serverTimeCache.time = serverTime;
+            serverTimeCache.lastFetch = now;
+            serverTimeCache.offsetMs = serverTime - now;
+        })
+        .catch(() => {})
+        .finally(() => {
+            isServerTimeSyncing = false;
+        });
+}
 
 // Keep-alive client for lower latency on repeated requests
 const httpClient = axios.create({
@@ -61,20 +79,21 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
     const requestParams = { ...params };
     
     if (requiresSignature) {
-        // Use cached server time or current local time with offset (ultra-fast)
+        // Use cached server time when available, otherwise local time + last known offset
         const now = Date.now();
         const timeSinceLastFetch = now - serverTimeCache.lastFetch;
         
-        // If cache is fresh (within 30s), use it; otherwise, fetch new server time
+        // If cache is fresh (within 30s), use it
         if (serverTimeCache.time && timeSinceLastFetch < 30000) {
-            // Calculate current server time by adding elapsed time to cached time
             requestParams.timestamp = serverTimeCache.time + timeSinceLastFetch;
         } else {
-            // Fetch new server time asynchronously (non-blocking - won't wait if possible)
-            const serverTime = await marketData.getServerTime().catch(() => Date.now());
-            serverTimeCache.time = serverTime;
-            serverTimeCache.lastFetch = now;
-            requestParams.timestamp = serverTime;
+            requestParams.timestamp = now + (serverTimeCache.offsetMs || 0);
+            syncServerTimeInBackground();
+        }
+
+        // Tolerate small local/server drift without extra blocking call
+        if (requestParams.recvWindow === undefined) {
+            requestParams.recvWindow = 5000;
         }
         
         // Signature must be calculated on non-URL-encoded string
@@ -159,6 +178,11 @@ const marketData = {
     async isSymbolTradable(symbol, forceRefresh = false) {
         const symbols = await this.getTradableSymbols(forceRefresh);
         return symbols.has(symbol);
+    },
+
+    isSymbolTradableCached(symbol) {
+        if (!tradableSymbolsCache.symbols) return null;
+        return tradableSymbolsCache.symbols.has(symbol);
     }
 };
 
@@ -299,7 +323,7 @@ const trading = {
      * For newly listed symbols that require Algo Order API, automatically detects and switches
      */
     async marketBuyWithTPSL(symbol, usdtAmount, tpPercent, slPercent, positionSide = 'BOTH', precision = null, options = {}) {
-        const { delayMs = 0 } = options;
+        const { delayMs = 0, asyncProtection = false } = options;
 
         if (!precision) {
             precision = await utils.getSymbolPrecision(symbol);
@@ -386,8 +410,8 @@ const trading = {
             reduceOnly: true
         };
         
-        // Execute both orders in parallel
-        const [slResult, tpResult] = await Promise.allSettled([
+        const placeProtectionOrders = async () => {
+            const [slResult, tpResult] = await Promise.allSettled([
             (async () => {
                 try {
                     const result = await this.placeOrder(slParams);
@@ -422,20 +446,45 @@ const trading = {
                     }
                 }
             })()
-        ]);
+            ]);
         
-        // Extract results from Promise.allSettled
-        if (slResult.status === 'fulfilled' && slResult.value.success) {
-            slOrder = slResult.value.order;
-        }
-        if (tpResult.status === 'fulfilled' && tpResult.value.success) {
-            tpOrder = tpResult.value.order;
-        }
+            // Extract results from Promise.allSettled
+            if (slResult.status === 'fulfilled' && slResult.value.success) {
+                slOrder = slResult.value.order;
+            }
+            if (tpResult.status === 'fulfilled' && tpResult.value.success) {
+                tpOrder = tpResult.value.order;
+            }
         
-        // Fail if both SL and TP failed (position unprotected)
-        if (!slOrder && !tpOrder) {
-            throw new Error('Both TP and SL orders failed - position has no protection');
+            // Fail if both SL and TP failed (position unprotected)
+            if (!slOrder && !tpOrder) {
+                throw new Error('Both TP and SL orders failed - position has no protection');
+            }
+
+            return {
+                slOrder,
+                tpOrder
+            };
+        };
+
+        if (asyncProtection) {
+            placeProtectionOrders().catch((e) => {
+                console.error(`[PROTECTION] ${symbol} async TP/SL failed: ${e.message}`);
+            });
+
+            return {
+                ...order,
+                quantity,
+                entryPrice,
+                takeProfitOrderId: null,
+                stopLossOrderId: null,
+                takeProfitPrice,
+                stopLossPrice,
+                protectionStatus: 'PENDING'
+            };
         }
+
+        await placeProtectionOrders();
         
         return {
             ...order,
@@ -453,7 +502,7 @@ const trading = {
      * For delisting scenarios - reversed TP/SL logic
      */
     async marketSellWithTPSL(symbol, usdtAmount, tpPercent, slPercent, positionSide = 'BOTH', precision = null, options = {}) {
-        const { delayMs = 0 } = options;
+        const { delayMs = 0, asyncProtection = false } = options;
 
         if (!precision) {
             precision = await utils.getSymbolPrecision(symbol);
@@ -537,7 +586,8 @@ const trading = {
             reduceOnly: true
         };
         
-        const [slResult, tpResult] = await Promise.allSettled([
+        const placeProtectionOrders = async () => {
+            const [slResult, tpResult] = await Promise.allSettled([
             (async () => {
                 try {
                     const result = await this.placeOrder(slParams);
@@ -572,18 +622,43 @@ const trading = {
                     }
                 }
             })()
-        ]);
+            ]);
         
-        if (slResult.status === 'fulfilled' && slResult.value.success) {
-            slOrder = slResult.value.order;
-        }
-        if (tpResult.status === 'fulfilled' && tpResult.value.success) {
-            tpOrder = tpResult.value.order;
-        }
+            if (slResult.status === 'fulfilled' && slResult.value.success) {
+                slOrder = slResult.value.order;
+            }
+            if (tpResult.status === 'fulfilled' && tpResult.value.success) {
+                tpOrder = tpResult.value.order;
+            }
         
-        if (!slOrder && !tpOrder) {
-            throw new Error('Both TP and SL orders failed - position has no protection');
+            if (!slOrder && !tpOrder) {
+                throw new Error('Both TP and SL orders failed - position has no protection');
+            }
+
+            return {
+                slOrder,
+                tpOrder
+            };
+        };
+
+        if (asyncProtection) {
+            placeProtectionOrders().catch((e) => {
+                console.error(`[PROTECTION] ${symbol} async TP/SL failed: ${e.message}`);
+            });
+
+            return {
+                ...order,
+                quantity,
+                entryPrice,
+                takeProfitOrderId: null,
+                stopLossOrderId: null,
+                takeProfitPrice,
+                stopLossPrice,
+                protectionStatus: 'PENDING'
+            };
         }
+
+        await placeProtectionOrders();
         
         return {
             ...order,
@@ -649,6 +724,7 @@ module.exports = {
     getPrice: marketData.getPrice,
     getExchangeInfo: marketData.getExchangeInfo,
     isSymbolTradable: marketData.isSymbolTradable.bind(marketData),
+    isSymbolTradableCached: marketData.isSymbolTradableCached.bind(marketData),
     getPositionInfo: account.getPositionInfo,
     changeInitialLeverage: account.changeInitialLeverage,
     getSymbolPrecision: utils.getSymbolPrecision

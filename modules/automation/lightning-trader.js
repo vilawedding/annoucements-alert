@@ -16,6 +16,8 @@ class LightningAutoTrader {
         this.binance = trading.binance;
         this.telegramQueue = [];
         this.isSendingTelegram = false;
+        this.fastModeSkipTradableCheck = process.env.AUTO_TRADE_FAST_SKIP_TRADABLE_CHECK !== 'false';
+        this.marketFirstAsyncProtection = process.env.AUTO_TRADE_MARKET_FIRST_ASYNC_PROTECTION !== 'false';
     }
     
     /**
@@ -141,11 +143,18 @@ class LightningAutoTrader {
             const tradeStartTime = Date.now();
             
             try {
-                const tradableNow = await this.binance.isSymbolTradable(symbol).catch(() => true);
-                if (!tradableNow) {
-                    const tradableAfterRefresh = await this.binance.isSymbolTradable(symbol, true).catch(() => false);
-                    if (!tradableAfterRefresh) {
-                        throw new Error('Symbol is not tradable on Binance Futures');
+                if (this.fastModeSkipTradableCheck) {
+                    const cachedTradable = this.binance.isSymbolTradableCached(symbol);
+                    if (cachedTradable === false) {
+                        throw new Error('Symbol is not tradable on Binance Futures (cached)');
+                    }
+                } else {
+                    const tradableNow = await this.binance.isSymbolTradable(symbol).catch(() => true);
+                    if (!tradableNow) {
+                        const tradableAfterRefresh = await this.binance.isSymbolTradable(symbol, true).catch(() => false);
+                        if (!tradableAfterRefresh) {
+                            throw new Error('Symbol is not tradable on Binance Futures');
+                        }
                     }
                 }
                 
@@ -172,7 +181,8 @@ class LightningAutoTrader {
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
-                        precision
+                        precision,
+                        { asyncProtection: this.marketFirstAsyncProtection }
                     )
                     : () => this.binance.trading.marketBuyWithTPSL(
                         symbol,
@@ -180,7 +190,8 @@ class LightningAutoTrader {
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
-                        precision
+                        precision,
+                        { asyncProtection: this.marketFirstAsyncProtection }
                     );
 
                 const order = await this.sniperRetry(tradeFn, 20, 50);
