@@ -166,7 +166,16 @@
     "title": "인터넷컴퓨터(ICP) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)",
     "link": "https://upbit.com/notice",
     "exchange": "UPBIT",
-    "detectedAt": 1773219424770,
+    "detectedAt": 1773221332240,
+    "orderedAt": 1773221332241,
+    "latency": 1
+  },
+  "a65f3f28fb8100ced92af9f2f2c7d8c4": {
+    "symbol": "GRSUSDT",
+    "title": "그로스톨코인(GRS) 거래지원 종료 안내 (1/16 15:00)",
+    "link": "https://upbit.com/notice",
+    "exchange": "UPBIT",
+    "detectedAt": 1773255704030,
     "orderedAt": null,
     "latency": null
   }

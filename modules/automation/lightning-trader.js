@@ -18,6 +18,8 @@ class LightningAutoTrader {
         this.isSendingTelegram = false;
         this.fastModeSkipTradableCheck = process.env.AUTO_TRADE_FAST_SKIP_TRADABLE_CHECK !== 'false';
         this.marketFirstAsyncProtection = process.env.AUTO_TRADE_MARKET_FIRST_ASYNC_PROTECTION !== 'false';
+        this.retryCount = Math.max(0, parseInt(process.env.AUTO_TRADE_RETRY_COUNT || '1', 10));
+        this.retryDelayMs = Math.max(0, parseInt(process.env.AUTO_TRADE_RETRY_DELAY_MS || '50', 10));
     }
     
     /**
@@ -78,18 +80,22 @@ class LightningAutoTrader {
         );
     }
 
-    async sniperRetry(fn, retries = 20, delayMs = 50) {
+    async sniperRetry(fn) {
         let lastError;
+        const totalRetries = this.retryCount;
+        const maxAttempts = totalRetries + 1;
+        const delayMs = this.retryDelayMs;
 
-        for (let i = 0; i < retries; i++) {
+        for (let i = 0; i < maxAttempts; i++) {
             try {
                 return await fn();
             } catch (error) {
                 lastError = error;
-                if (!this.shouldRetryTradeError(error) || i === retries - 1) {
+                if (!this.shouldRetryTradeError(error) || i === maxAttempts - 1) {
                     throw error;
                 }
-                console.warn(`[RETRY] ${i + 1}/${retries} failed: ${error.message}`);
+                const retryIndex = i + 1;
+                console.warn(`[RETRY] ${retryIndex}/${totalRetries} failed: ${error.message}`);
                 await new Promise(resolve => setTimeout(resolve, delayMs));
             }
         }
@@ -194,7 +200,7 @@ class LightningAutoTrader {
                         { asyncProtection: this.marketFirstAsyncProtection }
                     );
 
-                const order = await this.sniperRetry(tradeFn, 20, 50);
+                const order = await this.sniperRetry(tradeFn);
                 const tradeDuration = Date.now() - tradeStartTime;
                 
                 const result = {
