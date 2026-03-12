@@ -47,6 +47,7 @@ module.exports = {
     autoTrade: {
         enabled: process.env.AUTO_TRADE_ENABLED === 'true',
         upbitListing: process.env.AUTO_TRADE_UPBIT_LISTING !== 'false',
+        bithumbListing: process.env.AUTO_TRADE_BITHUMB_LISTING !== 'false',
         binanceListing: process.env.AUTO_TRADE_BINANCE_LISTING !== 'false',
         binanceDelisting: process.env.AUTO_TRADE_BINANCE_DELISTING === 'true',
         amount: parseFloat(process.env.AUTO_TRADE_AMOUNT) || 10,
@@ -54,6 +55,11 @@ module.exports = {
         stopLossPercent: parseFloat(process.env.AUTO_TRADE_SL_PERCENT) || 1.0,
         takeProfitPercent: parseFloat(process.env.AUTO_TRADE_TP_PERCENT) || 200.0,
         takeProfitPercentUpbit:
+            parseFloat(process.env.AUTO_TRADE_TP_PERCENT_UPBIT) ||
+            parseFloat(process.env.AUTO_TRADE_TP_PERCENT) ||
+            200.0,
+        takeProfitPercentBithumb:
+            parseFloat(process.env.AUTO_TRADE_TP_PERCENT_BITHUMB) ||
             parseFloat(process.env.AUTO_TRADE_TP_PERCENT_UPBIT) ||
             parseFloat(process.env.AUTO_TRADE_TP_PERCENT) ||
             200.0,

@@ -184,6 +184,27 @@ async function runBithumbMonitor() {
                 const a = result.latestAnnouncement;
                 const tokenText = a.tokens && a.tokens.length > 0 ? a.tokens.join(',') : 'N/A';
                 console.log(`📩 [BITHUMB] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title}`);
+
+                if (config.autoTrade.enabled && a._shouldTrade) {
+                    const tradeStartTime = Date.now();
+                    const detectionTime = a.detectedAt ? new Date(a.detectedAt) : new Date();
+
+                    const tradeResults = await lightningTrader.executeLight(a);
+
+                    if (tradeResults && tradeResults.length > 0) {
+                        const tradeEndTime = Date.now();
+                        const tradeDuration = tradeEndTime - tradeStartTime;
+                        const totalDuration = tradeEndTime - detectionTime.getTime();
+                        const successCount = tradeResults.filter(r => r.success).length;
+                        const endTime = new Date();
+                        const orderText = tradeResults
+                            .filter(r => r.success)
+                            .map(r => `${r.symbol}:entry=${r.entryPrice},qty=${r.executedQty || r.quantity},sl=${r.stopLoss},tp=${r.takeProfit},slId=${r.stopLossOrderId || 'N/A'},tpId=${r.takeProfitOrderId || 'N/A'}`)
+                            .join(' || ');
+
+                        console.log(`✅ [TRADE] ${successCount}/${tradeResults.length} | ${tradeDuration}ms | ${totalDuration}ms | ${formatTime(detectionTime)} → ${formatTime(endTime)} | ${orderText || 'NO_SUCCESS_ORDER'}`);
+                    }
+                }
             }
         } catch (error) {
             // Silent fail

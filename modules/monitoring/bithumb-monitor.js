@@ -108,7 +108,7 @@ class BithumbMonitor {
                 tokens,
                 detectedAt: detectionTime,
                 metadata,
-                _shouldTrade: false
+                _shouldTrade: category === 'LISTING'
             };
 
             storage.add(hash, metadata, 'BITHUMB');

@@ -117,6 +117,9 @@ class LightningAutoTrader {
         if (exchange === 'UPBIT') {
             if (!this.config.upbitListing) return null;
             if (category !== 'LISTING') return null;
+        } else if (exchange === 'BITHUMB') {
+            if (!this.config.bithumbListing) return null;
+            if (category !== 'LISTING') return null;
         } else if (exchange === 'BINANCE') {
             if (category === 'DELISTING') {
                 if (!this.config.binanceDelisting) return null;
@@ -136,7 +139,9 @@ class LightningAutoTrader {
 
         const takeProfitPercent = exchange === 'BINANCE'
             ? this.config.takeProfitPercentBinance
-            : this.config.takeProfitPercentUpbit;
+            : exchange === 'BITHUMB'
+                ? this.config.takeProfitPercentBithumb
+                : this.config.takeProfitPercentUpbit;
         
         const isShort = category === 'DELISTING';
         const executionStartTime = Date.now();
@@ -225,11 +230,17 @@ class LightningAutoTrader {
                 
                 // Record order execution in storage with millisecond precision (non-blocking)
                 if (announcementHash) {
-                    const sourceExchange = announcement.exchange === 'BINANCE' ? 'BINANCE' : 'UPBIT';
+                    const sourceExchange = exchange === 'BINANCE'
+                        ? 'BINANCE'
+                        : exchange === 'BITHUMB'
+                            ? 'BITHUMB'
+                            : 'UPBIT';
                     storage.recordOrderExecution(announcementHash, orderExecutionTime, sourceExchange);
                     // Save async without blocking trade flow
                     if (sourceExchange === 'BINANCE') {
                         storage.saveBinance().catch(() => {});
+                    } else if (sourceExchange === 'BITHUMB') {
+                        storage.saveBithumb().catch(() => {});
                     } else {
                         storage.saveUpbit().catch(() => {});
                     }
