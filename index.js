@@ -34,6 +34,11 @@ function startHealthServer() {
                     name: config.exchanges.upbit.name,
                     enabled: config.exchanges.upbit.enabled,
                     interval: `${config.exchanges.upbit.interval}ms`
+                },
+                {
+                    name: config.exchanges.bithumb.name,
+                    enabled: config.exchanges.bithumb.enabled,
+                    interval: `${config.exchanges.bithumb.interval}ms`
                 }
             ],
             autoTrade: {
@@ -44,7 +49,8 @@ function startHealthServer() {
             stats: {
                 totalSent: stats.total,
                 binanceSent: stats.binance,
-                upbitSent: stats.upbit
+                upbitSent: stats.upbit,
+                bithumbSent: stats.bithumb
             },
             performance: {
                 announcementDetection: perfStats.announcementDetection,
@@ -76,7 +82,7 @@ function startHeartbeatLogger() {
     const logHeartbeat = () => {
         const stats = storage.getStats();
         const uptimeMinutes = Math.floor(process.uptime() / 60);
-        console.log(`💓 [HEARTBEAT] ${formatTime(new Date())} | uptime=${uptimeMinutes}m | total=${stats.total} | binance=${stats.binance} | upbit=${stats.upbit}`);
+        console.log(`💓 [HEARTBEAT] ${formatTime(new Date())} | uptime=${uptimeMinutes}m | total=${stats.total} | binance=${stats.binance} | upbit=${stats.upbit} | bithumb=${stats.bithumb}`);
     };
 
     logHeartbeat(); // log immediately at startup
@@ -169,6 +175,26 @@ async function runUpbitMonitor() {
     }
 }
 
+async function runBithumbMonitor() {
+    while (true) {
+        const loopStart = Date.now();
+        try {
+            const result = await monitoring.bithumb.check();
+            if (result?.latestAnnouncement) {
+                const a = result.latestAnnouncement;
+                const tokenText = a.tokens && a.tokens.length > 0 ? a.tokens.join(',') : 'N/A';
+                console.log(`📩 [BITHUMB] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title}`);
+            }
+        } catch (error) {
+            // Silent fail
+        }
+
+        const elapsed = Date.now() - loopStart;
+        const waitMs = Math.max(0, config.exchanges.bithumb.interval - elapsed);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
+}
+
 // ==================== MAIN FUNCTION ====================
 async function main() {
     console.log(`
@@ -193,6 +219,10 @@ async function main() {
     
     if (config.exchanges.upbit.enabled) {
         runUpbitMonitor().catch(() => {});
+    }
+
+    if (config.exchanges.bithumb.enabled) {
+        runBithumbMonitor().catch(() => {});
     }
     
     console.log(`⚡ Bot running | Auto-trade: ${config.autoTrade.enabled ? 'ON' : 'OFF'}`);

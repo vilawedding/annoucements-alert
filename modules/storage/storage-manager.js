@@ -23,16 +23,19 @@ class StorageManager {
     constructor() {
         this.binanceFile = path.join(__dirname, '../../', config.storage.binanceFile);
         this.upbitFile = path.join(__dirname, '../../', config.storage.upbitFile);
+        this.bithumbFile = path.join(__dirname, '../../', config.storage.bithumbFile);
         
         // Changed from Set to Object to store detailed metadata
         this.binanceSentAnnouncements = {};
         this.upbitSentAnnouncements = {};
+        this.bithumbSentAnnouncements = {};
     }
     
     async loadAll() {
         await Promise.all([
             this.loadBinance(),
-            this.loadUpbit()
+            this.loadUpbit(),
+            this.loadBithumb()
         ]);
     }
     
@@ -59,11 +62,24 @@ class StorageManager {
             this.upbitSentAnnouncements = {};
         }
     }
+
+    async loadBithumb() {
+        try {
+            const data = await fs.readFile(this.bithumbFile, 'utf8');
+            const parsed = JSON.parse(data);
+            this.bithumbSentAnnouncements = parsed || {};
+            console.log(`✅ Loaded ${Object.keys(this.bithumbSentAnnouncements).length} Bithumb announcements`);
+        } catch (error) {
+            console.log('ℹ️ No Bithumb storage found, starting fresh');
+            this.bithumbSentAnnouncements = {};
+        }
+    }
     
     async saveAll() {
         await Promise.all([
             this.saveBinance(),
-            this.saveUpbit()
+            this.saveUpbit(),
+            this.saveBithumb()
         ]);
     }
     
@@ -84,6 +100,15 @@ class StorageManager {
             console.error('❌ Error saving Upbit storage:', error.message);
         }
     }
+
+    async saveBithumb() {
+        try {
+            const data = JSON.stringify(this.bithumbSentAnnouncements, null, 2);
+            await fs.writeFile(this.bithumbFile, data, 'utf8');
+        } catch (error) {
+            console.error('❌ Error saving Bithumb storage:', error.message);
+        }
+    }
     
     /**
      * Check if announcement already processed
@@ -93,6 +118,8 @@ class StorageManager {
             return hash in this.binanceSentAnnouncements;
         } else if (exchange === 'UPBIT') {
             return hash in this.upbitSentAnnouncements;
+        } else if (exchange === 'BITHUMB') {
+            return hash in this.bithumbSentAnnouncements;
         }
         return false;
     }
@@ -118,6 +145,8 @@ class StorageManager {
             this.binanceSentAnnouncements[hash] = detailedEntry;
         } else if (exchange === 'UPBIT') {
             this.upbitSentAnnouncements[hash] = detailedEntry;
+        } else if (exchange === 'BITHUMB') {
+            this.bithumbSentAnnouncements[hash] = detailedEntry;
         }
     }
     
@@ -134,6 +163,8 @@ class StorageManager {
             this.binanceSentAnnouncements[hash] = { ...this.binanceSentAnnouncements[hash], ...update };
         } else if (exchange === 'UPBIT' && hash in this.upbitSentAnnouncements) {
             this.upbitSentAnnouncements[hash] = { ...this.upbitSentAnnouncements[hash], ...update };
+        } else if (exchange === 'BITHUMB' && hash in this.bithumbSentAnnouncements) {
+            this.bithumbSentAnnouncements[hash] = { ...this.bithumbSentAnnouncements[hash], ...update };
         }
     }
     
@@ -145,6 +176,8 @@ class StorageManager {
             return this.binanceSentAnnouncements[hash].detectedAt;
         } else if (exchange === 'UPBIT' && hash in this.upbitSentAnnouncements) {
             return this.upbitSentAnnouncements[hash].detectedAt;
+        } else if (exchange === 'BITHUMB' && hash in this.bithumbSentAnnouncements) {
+            return this.bithumbSentAnnouncements[hash].detectedAt;
         }
         return null;
     }
@@ -157,6 +190,8 @@ class StorageManager {
             return this.binanceSentAnnouncements[hash];
         } else if (exchange === 'UPBIT' && hash in this.upbitSentAnnouncements) {
             return this.upbitSentAnnouncements[hash];
+        } else if (exchange === 'BITHUMB' && hash in this.bithumbSentAnnouncements) {
+            return this.bithumbSentAnnouncements[hash];
         }
         return null;
     }
@@ -166,9 +201,10 @@ class StorageManager {
      */
     getStats() {
         return {
-            total: Object.keys(this.binanceSentAnnouncements).length + Object.keys(this.upbitSentAnnouncements).length,
+            total: Object.keys(this.binanceSentAnnouncements).length + Object.keys(this.upbitSentAnnouncements).length + Object.keys(this.bithumbSentAnnouncements).length,
             binance: Object.keys(this.binanceSentAnnouncements).length,
-            upbit: Object.keys(this.upbitSentAnnouncements).length
+            upbit: Object.keys(this.upbitSentAnnouncements).length,
+            bithumb: Object.keys(this.bithumbSentAnnouncements).length
         };
     }
     
@@ -180,8 +216,10 @@ class StorageManager {
             return this.binanceSentAnnouncements;
         } else if (exchange === 'UPBIT') {
             return this.upbitSentAnnouncements;
+        } else if (exchange === 'BITHUMB') {
+            return this.bithumbSentAnnouncements;
         }
-        return { ...this.binanceSentAnnouncements, ...this.upbitSentAnnouncements };
+        return { ...this.binanceSentAnnouncements, ...this.upbitSentAnnouncements, ...this.bithumbSentAnnouncements };
     }
 }
 

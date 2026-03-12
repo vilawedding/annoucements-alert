@@ -32,6 +32,14 @@ module.exports = {
             baseUrl: "https://upbit.com",
             interval: parseInt(process.env.UPBIT_INTERVAL) || 500,
             apiUrl: "https://api-manager.upbit.com/api/v1/announcements"
+        },
+        bithumb: {
+            enabled: process.env.BITHUMB_ENABLED || false,
+            name: "Bithumb",
+            emoji: "🟠",
+            baseUrl: "https://www.bithumb.com",
+            interval: parseInt(process.env.BITHUMB_INTERVAL) || 200,
+            apiUrl: process.env.BITHUMB_API_URL || "https://feed.bithumb.com/_next/data/NLILjNtdG9PdJyIGBALYd/notice.json?category=9&page=1"
         }
     },
     
@@ -67,7 +75,8 @@ module.exports = {
     // Storage Configuration
     storage: {
         binanceFile: 'data/sent_announcements_binance.json',
-        upbitFile: 'data/sent_announcements_upbit.json'
+        upbitFile: 'data/sent_announcements_upbit.json',
+        bithumbFile: 'data/sent_announcements_bithumb.json'
     },
     
     // Server Configuration
