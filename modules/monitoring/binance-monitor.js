@@ -32,6 +32,7 @@ class BinanceMonitor {
     async fetchAnnouncements(catalogId) {
         try {
             const url = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query';
+            const cacheBust = Date.now();
 
             const response = await httpClient.get(url, {
                 params: {
@@ -39,8 +40,14 @@ class BinanceMonitor {
                     pageNo: 1,
                     pageSize: 5,
                     catalogId
+                    // _: cacheBust
                 },
-                timeout: 3500
+                headers: {
+                    'Cache-Control': 'no-cache, no-store, max-age=0',
+                    'Pragma': 'no-cache',
+                    'Expires': '0'
+                },
+                timeout: 2000
             });
             
             if (response.data.success && response.data.data?.catalogs?.length > 0) {
@@ -62,6 +69,7 @@ class BinanceMonitor {
             return { name: this.catalogNames[catalogId] || `Catalog ${catalogId}`, articles: [] };
             
         } catch (error) {
+            console.error(`[BINANCE] Error fetching announcements for catalog ${catalogId}: ${error.message}`);
             return { name: this.catalogNames[catalogId] || `Catalog ${catalogId}`, articles: [] };
         }
     }
@@ -269,9 +277,10 @@ class BinanceMonitor {
                             .update(`BINANCE-${article.catalogId}-${article.id}-${article.code}`)
                             .digest('hex');
 
-                        // API usually returns latest first. Stop when hitting first known item.
+                        // Do NOT stop at first known item. API order/caching can be inconsistent,
+                        // and new items may appear after already-known ones.
                         if (storage.has(articleHash, 'BINANCE')) {
-                            break;
+                            continue;
                         }
 
                         unseenArticles.push(article);

@@ -7,5 +7,14 @@
     "detectedAt": 1773032181377,
     "orderedAt": null,
     "latency": null
+  },
+  "2ae3361bed128ca4b6db5d321c32e044": {
+    "symbol": "KATUSDT",
+    "title": "Binance Will List Katana (KAT) with Seed Tag Applied",
+    "link": "https://www.binance.com/en/support/announcement/01f1ef18ab314cc78cd3744760e4dc1f",
+    "exchange": "BINANCE",
+    "detectedAt": 1773370709529,
+    "orderedAt": null,
+    "latency": null
   }
 }

@@ -39,7 +39,9 @@ module.exports = {
             emoji: "🟠",
             baseUrl: "https://www.bithumb.com",
             interval: parseInt(process.env.BITHUMB_INTERVAL) || 200,
-            apiUrl: process.env.BITHUMB_API_URL || "https://feed.bithumb.com/_next/data/NLILjNtdG9PdJyIGBALYd/notice.json?category=9&page=1"
+            apiUrl: process.env.BITHUMB_API_URL || "https://feed.bithumb.com/_next/data/NLILjNtdG9PdJyIGBALYd/notice.json?category=9&page=1",
+            cfClearance: process.env.BITHUMB_CF_CLEARANCE || '',
+            cookie: process.env.BITHUMB_COOKIE || ''
         }
     },
     

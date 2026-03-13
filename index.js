@@ -242,9 +242,9 @@ async function main() {
         runUpbitMonitor().catch(() => {});
     }
 
-    if (config.exchanges.bithumb.enabled) {
-        runBithumbMonitor().catch(() => {});
-    }
+    // if (config.exchanges.bithumb.enabled) {
+    //     runBithumbMonitor().catch(() => {});
+    // }
     
     console.log(`⚡ Bot running | Auto-trade: ${config.autoTrade.enabled ? 'ON' : 'OFF'}`);
     
