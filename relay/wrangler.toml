@@ -1,0 +1,4 @@
+# Optional CLI deploy (Node 18+): cd relay && npx wrangler deploy && npx wrangler secret put RELAY_KEY
+name = "upbit-relay"
+main = "cloudflare-worker.js"
+compatibility_date = "2024-09-23"

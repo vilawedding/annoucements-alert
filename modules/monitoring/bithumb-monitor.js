@@ -3,6 +3,9 @@ const crypto = require('crypto');
 const https = require('https');
 const config = require('../../config/config');
 const storage = require('../storage');
+const { MonitorHealth, describeHttpError } = require('./monitor-health');
+
+const BUILD_ID_REFRESH_COOLDOWN_MS = 30000;
 
 const httpClient = axios.create({
     timeout: 2500,
@@ -15,9 +18,46 @@ const httpClient = axios.create({
 class BithumbMonitor {
     constructor() {
         this.config = config.exchanges.bithumb;
-        this.lastNoticeId = null;
+        this.apiUrl = this.config.apiUrl;
+        this.seenIds = new Set();
         this.lastCloudflareWarningAt = 0;
+        this.lastBuildIdRefreshAt = 0;
+        this.preferredProfileIndex = 0;
         this.sessionCookie = this.config.cookie || '';
+        this.health = new MonitorHealth('BITHUMB');
+    }
+
+    /**
+     * The feed URL embeds the Next.js buildId (`/_next/data/<buildId>/notice.json`),
+     * which changes on every Bithumb deploy and turns the URL into a 404.
+     * Re-read the current buildId from the notice page's __NEXT_DATA__ and rebuild the URL.
+     */
+    async _refreshBuildId(headers) {
+        const now = Date.now();
+        if (now - this.lastBuildIdRefreshAt < BUILD_ID_REFRESH_COOLDOWN_MS) return false;
+        this.lastBuildIdRefreshAt = now;
+
+        try {
+            const response = await httpClient.get(this.config.pageUrl, {
+                headers: { ...headers, Accept: 'text/html' },
+                timeout: 5000
+            });
+            const match = String(response.data || '').match(/"buildId"\s*:\s*"([^"]+)"/);
+            if (!match) {
+                this.health.error('buildId', 'buildId not found in notice page');
+                return false;
+            }
+
+            const nextUrl = this.apiUrl.replace(/\/_next\/data\/[^/]+\//, `/_next/data/${match[1]}/`);
+            if (nextUrl === this.apiUrl) return false;
+
+            console.log(`🔄 [BITHUMB] Next.js buildId changed → ${match[1]}`);
+            this.apiUrl = nextUrl;
+            return true;
+        } catch (error) {
+            this.health.error('buildId', describeHttpError(error));
+            return false;
+        }
     }
 
     _extractCookiePairs(cookieString = '') {
@@ -70,9 +110,7 @@ class BithumbMonitor {
         console.log('⚠️ [BITHUMB] Cloudflare 403 block from server IP. If browser works but bot fails, set BITHUMB_COOKIE (full cookie string) or BITHUMB_CF_CLEARANCE in .env.');
     }
 
-    async fetchLatestNotice() {
-        const url = this.config.apiUrl;
-
+    async fetchNotices() {
         const profiles = [
             {
                 // Match the successful Postman request as close as possible
@@ -102,10 +140,16 @@ class BithumbMonitor {
         ];
 
         let lastErr = null;
+        let buildIdRefreshed = false;
 
-        for (const profile of profiles) {
+        // Try the last profile that worked first, so a Cloudflare-blocked profile
+        // doesn't add a wasted round trip to every poll.
+        const order = profiles.map((_, i) => (this.preferredProfileIndex + i) % profiles.length);
+
+        for (let k = 0; k < order.length; k++) {
+            const profileIndex = order[k];
+            const headers = { ...profiles[profileIndex].headers };
             try {
-                const headers = { ...profile.headers };
                 const cookieHeader = this.sessionCookie
                     || this.config.cookie
                     || (this.config.cfClearance ? `cf_clearance=${this.config.cfClearance}` : '');
@@ -114,7 +158,7 @@ class BithumbMonitor {
                     headers.Cookie = cookieHeader;
                 }
 
-                const response = await httpClient.get(url, { headers });
+                const response = await httpClient.get(this.apiUrl, { headers });
 
                 // Keep latest anti-bot cookies for next polls
                 const setCookieHeaders = response?.headers?.['set-cookie'] || [];
@@ -122,12 +166,23 @@ class BithumbMonitor {
                     this.sessionCookie = this._mergeCookieHeader(headers.Cookie || '', setCookieHeaders);
                 }
 
-                const notices = response.data?.pageProps?.noticeList || [];
-                return notices[0] || null; // only first record as requested
+                const notices = response.data?.pageProps?.noticeList;
+                if (!Array.isArray(notices)) {
+                    this.health.error('response', 'pageProps.noticeList missing');
+                    return [];
+                }
+
+                this.preferredProfileIndex = profileIndex;
+                this.health.success();
+                return notices;
             } catch (err) {
                 lastErr = err;
-                if (this._isCloudflareBlocked(err)) {
-                    continue;
+                if (err?.response?.status === 404 && !buildIdRefreshed) {
+                    buildIdRefreshed = true;
+                    if (await this._refreshBuildId(headers)) {
+                        k--; // retry same profile with the new URL
+                        continue;
+                    }
                 }
             }
         }
@@ -135,7 +190,10 @@ class BithumbMonitor {
         if (this._isCloudflareBlocked(lastErr)) {
             this._warnCloudflareBlocked();
         }
-        return null;
+        if (lastErr) {
+            this.health.error('fetch', describeHttpError(lastErr));
+        }
+        return [];
     }
 
     extractToken(title = '') {
@@ -153,75 +211,95 @@ class BithumbMonitor {
         return 'OTHER';
     }
 
-    async check() {
-        if (!this.config.enabled) {
-            return { processed: 0, sent: 0, announcement: null, latestAnnouncement: null };
+    processNotice(notice) {
+        const listedAtRaw = notice.publicationDateTime || notice.modifyDateTime || '';
+        const listedAt = listedAtRaw ? new Date(`${listedAtRaw.replace(' ', 'T')}+09:00`).getTime() : Date.now();
+        const hash = crypto.createHash('md5').update(`BITHUMB-${notice.id}-${listedAtRaw}`).digest('hex');
+
+        if (storage.has(hash, 'BITHUMB')) {
+            return null;
         }
 
+        const category = this.categorize(notice);
+        const token = this.extractToken(notice.title || '');
+        const tokens = token ? [token] : [];
+        const detectionTime = Date.now();
+
+        const metadata = {
+            symbol: token ? `${token}USDT` : '',
+            title: notice.title || '',
+            link: 'https://www.bithumb.com/customer_support/info_announcement',
+            exchange: 'BITHUMB',
+            detectedAt: detectionTime,
+            orderedAt: null,
+            latency: null
+        };
+
+        return {
+            hash,
+            exchange: 'BITHUMB',
+            category,
+            title: notice.title || '',
+            url: metadata.link,
+            symbol: metadata.symbol || null,
+            releaseDate: listedAt,
+            tokens,
+            detectedAt: detectionTime,
+            metadata,
+            _shouldTrade: category === 'LISTING'
+        };
+    }
+
+    async check() {
+        const empty = { processed: 0, sent: 0, announcements: [], announcement: null, latestAnnouncement: null };
+        if (!this.config.enabled) {
+            return empty;
+        }
+
+        const announcements = [];
         let processed = 0;
-        let sent = 0;
-        let latestAnnouncement = null;
 
         try {
-            const notice = await this.fetchLatestNotice();
-            if (!notice || !notice.id) {
-                return { processed, sent, announcement: null, latestAnnouncement };
+            const notices = (await this.fetchNotices()).filter(n => n && n.id);
+            if (notices.length === 0) {
+                return empty;
             }
 
-            if (this.lastNoticeId && String(this.lastNoticeId) === String(notice.id)) {
-                return { processed, sent, announcement: null, latestAnnouncement };
+            // First successful poll: only the newest notice is a candidate (same as before);
+            // older ones are baselined, otherwise an empty storage would re-trade a whole page
+            // of old listings on startup.
+            if (this.seenIds.size === 0) {
+                notices.slice(1).forEach(n => this.seenIds.add(String(n.id)));
             }
 
-            this.lastNoticeId = notice.id;
-            processed = 1;
+            // Process every unseen notice (not only noticeList[0]): several notices can be
+            // published between polls, and the first item may be a pinned one.
+            const unseen = notices.filter(n => !this.seenIds.has(String(n.id))).reverse();
 
-            const listedAtRaw = notice.publicationDateTime || notice.modifyDateTime || '';
-            const listedAt = listedAtRaw ? new Date(`${listedAtRaw.replace(' ', 'T')}+09:00`).getTime() : Date.now();
-            const hash = crypto.createHash('md5').update(`BITHUMB-${notice.id}-${listedAtRaw}`).digest('hex');
+            for (const notice of unseen) {
+                this.seenIds.add(String(notice.id));
+                processed++;
 
-            if (storage.has(hash, 'BITHUMB')) {
-                return { processed, sent, announcement: null, latestAnnouncement };
+                const announcement = this.processNotice(notice);
+                if (!announcement) continue;
+
+                storage.add(announcement.hash, announcement.metadata, 'BITHUMB');
+                announcements.push(announcement);
             }
 
-            const category = this.categorize(notice);
-            const token = this.extractToken(notice.title || '');
-            const tokens = token ? [token] : [];
-            const detectionTime = Date.now();
-
-            const metadata = {
-                symbol: token ? `${token}USDT` : '',
-                title: notice.title || '',
-                link: 'https://www.bithumb.com/customer_support/info_announcement',
-                exchange: 'BITHUMB',
-                detectedAt: detectionTime,
-                orderedAt: null,
-                latency: null
-            };
-
-            const announcement = {
-                hash,
-                exchange: 'BITHUMB',
-                category,
-                title: notice.title || '',
-                url: metadata.link,
-                symbol: metadata.symbol || null,
-                releaseDate: listedAt,
-                tokens,
-                detectedAt: detectionTime,
-                metadata,
-                _shouldTrade: category === 'LISTING'
-            };
-
-            storage.add(hash, metadata, 'BITHUMB');
-            storage.saveBithumb().catch(() => {});
-
-            latestAnnouncement = announcement;
-            sent = 1;
-
-            return { processed, sent, announcement: null, latestAnnouncement };
-        } catch (_) {
-            return { processed, sent, announcement: null, latestAnnouncement };
+            if (announcements.length > 0) {
+                storage.saveBithumb().catch(() => {});
+            }
+        } catch (error) {
+            this.health.error('check', error.message);
         }
+
+        const latestAnnouncement = announcements[announcements.length - 1] || null;
+        return { processed, sent: announcements.length, announcements, announcement: null, latestAnnouncement };
+    }
+
+    getHealth() {
+        return { ...this.health.toJSON(), apiUrl: this.apiUrl };
     }
 }
 

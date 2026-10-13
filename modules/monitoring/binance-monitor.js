@@ -4,6 +4,10 @@ const cheerio = require('cheerio');
 const https = require('https');
 const config = require('../../config/config');
 const storage = require('../storage');
+const { MonitorHealth, describeHttpError } = require('./monitor-health');
+
+const LIST_URL = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query';
+const CACHE_KEY_VARIANTS = 1000;
 
 const httpClient = axios.create({
     timeout: 5000,
@@ -27,21 +31,30 @@ class BinanceMonitor {
         this.catalogIds = this.config.catalogIds;
         this.catalogNames = this.config.catalogNames;
         this.blacklist = new Set(['USDT', 'FDUSD', 'TUSD', 'USD', 'BTC', 'ETH', 'BNB']);
+        this.health = new MonitorHealth('BINANCE');
+    }
+
+    articleHash(article) {
+        return crypto.createHash('md5').update(`BINANCE-${article.catalogId}-${article.id}-${article.code}`).digest('hex');
     }
     
+    /**
+     * The list API sits behind CloudFront with a ~120s TTL (age climbs to ~119s before a
+     * refresh, measured 2026-10-13), so a fixed URL can show a new announcement up to 2 minutes
+     * late. Unknown params (`_=ts`) are rejected with HTTP 400, but catalogId accepts leading
+     * zeros ("048" = 48) and each spelling is a separate cache key: rotating the number of
+     * zeros gives a key nobody else requests (CloudFront Miss → served fresh from origin).
+     * 1..CACHE_KEY_VARIANTS zeros: a key is reused only after that many polls, far beyond the TTL.
+     */
+    _freshListUrl(catalogId) {
+        this.cacheKeyCounter = ((this.cacheKeyCounter || 0) % CACHE_KEY_VARIANTS) + 1;
+        const zeros = '0'.repeat(this.cacheKeyCounter);
+        return `${LIST_URL}?type=1&pageNo=1&pageSize=5&catalogId=${zeros}${catalogId}`;
+    }
+
     async fetchAnnouncements(catalogId) {
         try {
-            const url = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query';
-            const cacheBust = Date.now();
-
-            const response = await httpClient.get(url, {
-                params: {
-                    type: 1,
-                    pageNo: 1,
-                    pageSize: 5,
-                    catalogId
-                    // _: cacheBust
-                },
+            const response = await httpClient.get(this._freshListUrl(catalogId), {
                 headers: {
                     'Cache-Control': 'no-cache, no-store, max-age=0',
                     'Pragma': 'no-cache',
@@ -50,6 +63,12 @@ class BinanceMonitor {
                 timeout: 2000
             });
             
+            if (!response.data?.success) {
+                this.health.error(`catalog ${catalogId}`, 'response success=false');
+            } else {
+                this.health.success();
+            }
+
             if (response.data.success && response.data.data?.catalogs?.length > 0) {
                 const catalog = response.data.data.catalogs[0];
                 return {
@@ -69,7 +88,7 @@ class BinanceMonitor {
             return { name: this.catalogNames[catalogId] || `Catalog ${catalogId}`, articles: [] };
             
         } catch (error) {
-            console.error(`[BINANCE] Error fetching announcements for catalog ${catalogId}: ${error.message}`);
+            this.health.error(`catalog ${catalogId}`, describeHttpError(error));
             return { name: this.catalogNames[catalogId] || `Catalog ${catalogId}`, articles: [] };
         }
     }
@@ -126,8 +145,27 @@ class BinanceMonitor {
             return Array.from(tokens);
             
         } catch (error) {
+            this.health.error('delistDetails', `${articleCode}: ${describeHttpError(error)}`);
             return [];
         }
+    }
+
+    /**
+     * Only wait for the (slow, up to 15s) article page when delisting auto-trade
+     * actually needs the tokens; otherwise resolve them in the background so the
+     * poll loop is not blocked and listing detection keeps running.
+     */
+    _needsDelistTokensForTrade() {
+        return config.autoTrade.enabled && config.autoTrade.binanceDelisting;
+    }
+
+    _resolveDelistTokensInBackground(code, title) {
+        this.parseDelistDetails(code)
+            .then(tokens => {
+                const validTokens = this.filterValidTokens(tokens);
+                console.log(`📩 [BINANCE] DELISTING tokens resolved | ${validTokens.length > 0 ? validTokens.join(',') : 'N/A'} | ${title}`);
+            })
+            .catch(error => this.health.error('delistDetails', error.message));
     }
     
     extractTokens(title) {
@@ -185,10 +223,8 @@ class BinanceMonitor {
         return 'OTHER';
     }
     
-    async processAnnouncement(article) {
-        const { id, code, title, releaseDate, url, catalogId } = article;
-        
-        const hash = crypto.createHash('md5').update(`BINANCE-${catalogId}-${id}-${code}`).digest('hex');
+    async processAnnouncement(article, hash = this.articleHash(article)) {
+        const { code, title, releaseDate, url, catalogId } = article;
         
         if (storage.has(hash, 'BINANCE')) {
             return null;
@@ -200,16 +236,23 @@ class BinanceMonitor {
         }
 
         const tokens = this.extractTokens(title);
+        let pendingDelistTokens = false;
         
         if (category === 'DELISTING' && tokens.length === 0 && /(delist|removal)/i.test(title)) {
-            const detailedTokens = await this.parseDelistDetails(code);
-            if (detailedTokens.length > 0) {
-                tokens.push(...detailedTokens);
+            if (this._needsDelistTokensForTrade()) {
+                const detailedTokens = await this.parseDelistDetails(code);
+                if (detailedTokens.length > 0) {
+                    tokens.push(...detailedTokens);
+                }
+            } else {
+                pendingDelistTokens = true;
+                this._resolveDelistTokensInBackground(code, title);
             }
         }
 
         const validTokens = this.filterValidTokens(tokens);
-        if (validTokens.length === 0) {
+        // A pending delisting is still stored, so the page is not re-fetched on every poll.
+        if (validTokens.length === 0 && !pendingDelistTokens) {
             return null;
         }
         
@@ -251,16 +294,19 @@ class BinanceMonitor {
             formattedDate,
             metadata,
             detectedAt: detectionTime,
-            _shouldTrade: category === 'LISTING' || category === 'NEW_PAIRS'
+            // Candidates only; the trader decides per AUTO_TRADE_BINANCE_* flags
+            // (DELISTING was never forwarded before, so AUTO_TRADE_BINANCE_DELISTING had no effect).
+            _shouldTrade: ['LISTING', 'NEW_PAIRS', 'DELISTING'].includes(category)
         };
     }
     
     async check() {
         if (!this.config.enabled) {
-            return { processed: 0, sent: 0, latestAnnouncement: null };
+            return { processed: 0, sent: 0, announcements: [], latestAnnouncement: null };
         }
         
         let processed = 0, sent = 0, latestAnnouncement = null;
+        const found = [];
         
         try {
             const catalogResults = await Promise.all(
@@ -272,18 +318,15 @@ class BinanceMonitor {
                     const unseenArticles = [];
 
                     for (const article of catalogData.articles) {
-                        const articleHash = crypto
-                            .createHash('md5')
-                            .update(`BINANCE-${article.catalogId}-${article.id}-${article.code}`)
-                            .digest('hex');
+                        const hash = this.articleHash(article);
 
                         // Do NOT stop at first known item. API order/caching can be inconsistent,
                         // and new items may appear after already-known ones.
-                        if (storage.has(articleHash, 'BINANCE')) {
+                        if (storage.has(hash, 'BINANCE')) {
                             continue;
                         }
 
-                        unseenArticles.push(article);
+                        unseenArticles.push({ article, hash });
                     }
 
                     if (unseenArticles.length === 0) {
@@ -291,7 +334,7 @@ class BinanceMonitor {
                     }
 
                     const announcements = await Promise.all(
-                        unseenArticles.map(article => this.processAnnouncement(article))
+                        unseenArticles.map(({ article, hash }) => this.processAnnouncement(article, hash))
                     );
 
                     processed += unseenArticles.length;
@@ -299,6 +342,7 @@ class BinanceMonitor {
                     for (const announcement of announcements) {
                         if (announcement) {
                             sent++;
+                            found.push(announcement);
                             if (!latestAnnouncement) {
                                 latestAnnouncement = announcement;
                             }
@@ -306,18 +350,22 @@ class BinanceMonitor {
                         }
                     }
                 } catch (error) {
-                    console.error(`[BINANCE] Error processing catalog: ${error.message}`);
+                    this.health.error('processCatalog', error.message);
                 }
             }
 
             if (sent > 0) {
-                await storage.saveBinance();
+                storage.saveBinance().catch(() => {});
             }
         } catch (error) {
-            console.error(`[BINANCE] Error checking announcements: ${error.message}`);
+            this.health.error('check', error.message);
         }
         
-        return { processed, sent, latestAnnouncement };
+        return { processed, sent, announcements: found, latestAnnouncement };
+    }
+
+    getHealth() {
+        return this.health.toJSON();
     }
 }
 

@@ -84,30 +84,52 @@ class StorageManager {
     }
     
     async saveBinance() {
-        try {
-            const data = JSON.stringify(this.binanceSentAnnouncements, null, 2);
-            await fs.writeFile(this.binanceFile, data, 'utf8');
-        } catch (error) {
-            console.error('❌ Error saving Binance storage:', error.message);
-        }
+        await this._saveFile(this.binanceFile, () => this.binanceSentAnnouncements, 'Binance');
     }
-    
+
     async saveUpbit() {
-        try {
-            const data = JSON.stringify(this.upbitSentAnnouncements, null, 2);
-            await fs.writeFile(this.upbitFile, data, 'utf8');
-        } catch (error) {
-            console.error('❌ Error saving Upbit storage:', error.message);
-        }
+        await this._saveFile(this.upbitFile, () => this.upbitSentAnnouncements, 'Upbit');
     }
 
     async saveBithumb() {
-        try {
-            const data = JSON.stringify(this.bithumbSentAnnouncements, null, 2);
-            await fs.writeFile(this.bithumbFile, data, 'utf8');
-        } catch (error) {
-            console.error('❌ Error saving Bithumb storage:', error.message);
+        await this._saveFile(this.bithumbFile, () => this.bithumbSentAnnouncements, 'Bithumb');
+    }
+
+    /**
+     * Serialize writes per file: concurrent fs.writeFile calls on the same path can
+     * interleave and corrupt the JSON. While a write is in flight, further save
+     * requests are coalesced into one follow-up write of the latest state.
+     * Writes go to a temp file then rename (atomic on POSIX), so a crash mid-write
+     * never leaves a truncated storage file.
+     */
+    _saveFile(file, getData, label) {
+        this._saveState = this._saveState || {};
+        const state = this._saveState[file] || (this._saveState[file] = { running: null, pending: null });
+
+        if (state.running) {
+            if (!state.pending) {
+                state.pending = state.running.then(() => {
+                    state.pending = null;
+                    return this._saveFile(file, getData, label);
+                });
+            }
+            return state.pending;
         }
+
+        state.running = (async () => {
+            const tmpFile = `${file}.tmp`;
+            try {
+                const data = JSON.stringify(getData(), null, 2);
+                await fs.writeFile(tmpFile, data, 'utf8');
+                await fs.rename(tmpFile, file);
+            } catch (error) {
+                console.error(`❌ Error saving ${label} storage:`, error.message);
+            } finally {
+                state.running = null;
+            }
+        })();
+
+        return state.running;
     }
     
     /**
