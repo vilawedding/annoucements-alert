@@ -4,6 +4,8 @@ const https = require('https');
 const config = require('../../config/config');
 const storage = require('../storage');
 const { MonitorHealth, describeHttpError } = require('./monitor-health');
+const { SeenStore } = require('../storage/seen-store');
+const path = require('path');
 
 const BUILD_ID_REFRESH_COOLDOWN_MS = 30000;
 
@@ -19,7 +21,9 @@ class BithumbMonitor {
     constructor() {
         this.config = config.exchanges.bithumb;
         this.apiUrl = this.config.apiUrl;
-        this.seenIds = new Set();
+        // Persisted across restarts (data/seen_bithumb.json)
+        this.seenStore = new SeenStore(path.join(__dirname, '../../', config.storage.seenBithumbFile));
+        this.seenIds = this.seenStore.set;
         this.lastCloudflareWarningAt = 0;
         this.lastBuildIdRefreshAt = 0;
         this.preferredProfileIndex = 0;
@@ -196,6 +200,12 @@ class BithumbMonitor {
         return [];
     }
 
+    _markSeen(id) {
+        // store first: seenIds is normally the store's own Set (see upbit-monitor _markSeen)
+        this.seenStore.add(String(id));
+        this.seenIds.add(String(id));
+    }
+
     extractToken(title = '') {
         const match = title.match(/\(([A-Z0-9]{2,15})\)/);
         return match ? match[1].toUpperCase() : null;
@@ -269,7 +279,7 @@ class BithumbMonitor {
             // older ones are baselined, otherwise an empty storage would re-trade a whole page
             // of old listings on startup.
             if (this.seenIds.size === 0) {
-                notices.slice(1).forEach(n => this.seenIds.add(String(n.id)));
+                notices.slice(1).forEach(n => this._markSeen(String(n.id)));
             }
 
             // Process every unseen notice (not only noticeList[0]): several notices can be
@@ -277,7 +287,7 @@ class BithumbMonitor {
             const unseen = notices.filter(n => !this.seenIds.has(String(n.id))).reverse();
 
             for (const notice of unseen) {
-                this.seenIds.add(String(notice.id));
+                this._markSeen(String(notice.id));
                 processed++;
 
                 const announcement = this.processNotice(notice);

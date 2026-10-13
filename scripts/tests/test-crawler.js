@@ -1,6 +1,7 @@
 // Crawler regression tests (no network, no writes to data/ files).
 // Run: node scripts/tests/test-crawler.js
 const assert = require('assert');
+process.env.SEEN_STORE_DISABLED = 'true'; // never touch data/seen_*.json from tests
 const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
@@ -392,6 +393,60 @@ test('binance: list URL rotates catalogId cache keys (CloudFront TTL ~120s), nev
     }
     assert.strictEqual(keys.size, 1000, 'a key is reused only after 1000 polls');
     assert.ok(/catalogId=048$/.test(binance._freshListUrl(48)), 'wraps around');
+});
+
+test('seen store persists keys across restarts and caps its size', () => {
+    const { SeenStore } = require('../../modules/storage/seen-store');
+    const prev = process.env.SEEN_STORE_DISABLED;
+    process.env.SEEN_STORE_DISABLED = 'false';
+    try {
+        const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'seen-')), 'seen.json');
+        const a = new SeenStore(file, { maxEntries: 3 });
+        ['k1', 'k2', 'k3', 'k4'].forEach(k => a.add(k));
+        a.flush();
+        const b = new SeenStore(file, { maxEntries: 3 });
+        assert.ok(!b.has('k1'), 'oldest dropped');
+        assert.ok(b.has('k2') && b.has('k4'), 'recent keys survive a restart');
+
+        // monitors share the store's Set: marking through the monitor must still persist
+        const file2 = path.join(path.dirname(file), 'seen2.json');
+        const c = new SeenStore(file2);
+        const mon = { seenStore: c, seenKeys: c.set, _seenKeysOf: n => [`uuid:${n.uuid}`] };
+        upbit._markSeen.call(mon, { uuid: 'x1' });
+        c.flush();
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file2, 'utf8')), ['uuid:x1']);
+    } finally {
+        process.env.SEEN_STORE_DISABLED = prev;
+    }
+});
+
+test('trader never trades a signal older than AUTO_TRADE_MAX_SIGNAL_AGE_SEC', async () => {
+    const trader = require('../../modules/automation/lightning-trader');
+    const realEnabled = config.autoTrade.enabled;
+    const realPm = trader.positionManager;
+    config.autoTrade.enabled = true;
+    config.autoTrade.upbitWarning = true;
+    trader.positionManager = null;
+    let ordered = false;
+    const realEntry = trader.binance.trading.marketEntry;
+    trader.binance.trading.marketEntry = async () => { ordered = true; throw new Error('stop'); };
+    try {
+        const old = { exchange: 'UPBIT', category: 'WARNING', title: '블러(BLUR) 거래 유의 종목 지정 안내', tokens: ['BLUR'], releaseDate: Date.now() - 70 * 60000 };
+        assert.strictEqual(await trader.executeLight(old), null);
+        assert.strictEqual(await trader.executeLight({ ...old, releaseDate: undefined }), null, 'unknown publication time');
+        assert.ok(!ordered, 'no order for stale / undated signals');
+    } finally {
+        trader.binance.trading.marketEntry = realEntry;
+        trader.positionManager = realPm;
+        config.autoTrade.enabled = realEnabled;
+    }
+});
+
+test('upbit: release date is the ORIGINAL publication time (edits do not refresh it)', () => {
+    resetStorage();
+    upbit.seenKeys = new Set();
+    const a = upbit.processAnnouncement({ id: 6645, uuid: 'u6645', title: '카이아(KAIA) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)', first_listed_at: '2026-10-09T17:06:46+09:00', listed_at: '2026-10-09T18:23:09+09:00' });
+    assert.strictEqual(a.releaseDate, new Date('2026-10-09T17:06:46+09:00').getTime());
 });
 
 // ==================== STORAGE ====================

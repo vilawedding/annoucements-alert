@@ -1,6 +1,7 @@
 // Position manager / trade-engine / ladder tests (fake exchange + fake mark stream, no network).
 // Run: node scripts/tests/test-position-manager.js
 const assert = require('assert');
+process.env.SEEN_STORE_DISABLED = 'true'; // never touch data/seen_*.json from tests
 const fs = require('fs');
 const os = require('os');
 const path = require('path');

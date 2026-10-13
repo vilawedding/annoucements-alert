@@ -145,7 +145,11 @@ async function executeTrade(a) {
 
 function handleAnnouncement(a) {
     logAnnouncement(a);
-    telegram.notify(telegram.createAnnouncementMessage(a), 'signal');
+    // Old notices first seen now (startup, restart) are logged but not re-sent to Telegram.
+    const ageMs = Date.now() - Number(a.releaseDate);
+    if (Number(a.releaseDate) > 0 && ageMs <= config.telegram.maxSignalAgeMin * 60000) {
+        telegram.notify(telegram.createAnnouncementMessage(a), 'signal');
+    }
 
     // Fire-and-forget: awaiting the order here would pause polling for the whole trade.
     if (config.autoTrade.enabled && a._shouldTrade) {
@@ -211,6 +215,8 @@ async function main() {
     
     // Handle graceful shutdown (SIGINT = Ctrl+C, SIGTERM = `docker stop` / orchestrators)
     const shutdown = async () => {
+        monitoring.upbit.seenStore.flush();
+        monitoring.bithumb.seenStore.flush();
         await storage.saveAll();
         process.exit(0);
     };

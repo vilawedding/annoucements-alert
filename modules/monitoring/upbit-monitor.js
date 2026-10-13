@@ -4,6 +4,8 @@ const config = require('../../config/config');
 const storage = require('../storage');
 const { MonitorHealth, describeHttpError } = require('./monitor-health');
 const { ProxyPool } = require('./proxy-pool');
+const { SeenStore } = require('../storage/seen-store');
+const path = require('path');
 
 const REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -38,7 +40,9 @@ function base64url(input) {
 class UpbitMonitor {
     constructor() {
         this.config = config.exchanges.upbit;
-        this.seenKeys = new Set();
+        // Persisted across restarts (data/seen_upbit.json)
+        this.seenStore = new SeenStore(path.join(__dirname, '../../', config.storage.seenUpbitFile));
+        this.seenKeys = this.seenStore.set;
         this.restBaselined = false;
         this.pool = new ProxyPool(this.config.proxies, {
             minIntervalMs: this.config.perIpMinIntervalMs,
@@ -67,7 +71,12 @@ class UpbitMonitor {
     }
 
     _markSeen(notice) {
-        this._seenKeysOf(notice).forEach(key => this.seenKeys.add(key));
+        // store first: seenKeys is normally the store's own Set, and add() only schedules a
+        // save for keys it has not seen yet.
+        this._seenKeysOf(notice).forEach(key => {
+            this.seenStore.add(key);
+            this.seenKeys.add(key);
+        });
     }
 
     // Legacy REST hash (kept unchanged so existing storage files still de-dup).
@@ -355,8 +364,11 @@ class UpbitMonitor {
         const tokens = this.extractTokens(title);
         const token = tokens[0] || null;
 
-        const releaseDate = typeof listed_at === 'number' ? listed_at : new Date(listed_at).getTime();
-        const formattedDate = new Date(listed_at).toLocaleString('en-US', {
+        // Original publication time: listed_at moves when Upbit edits a notice (KAIA: first
+        // 17:06:46, listed_at 18:23:09) and must not make an old notice look fresh.
+        const publishedAt = article.first_listed_at || listed_at;
+        const releaseDate = typeof publishedAt === 'number' ? publishedAt : new Date(publishedAt).getTime();
+        const formattedDate = new Date(publishedAt).toLocaleString('en-US', {
             timeZone: 'Asia/Seoul',
             hour12: false
         }) + ' (KST)';

@@ -95,7 +95,9 @@ module.exports = {
         // order/pnl fall back to the signal chat when not set.
         chatId: process.env.TELEGRAM_CHAT_ID || '-1003591132823',
         orderChatId: process.env.TELEGRAM_ORDER_CHAT_ID || process.env.TELEGRAM_CHAT_ID,
-        pnlChatId: process.env.TELEGRAM_PNL_CHAT_ID || process.env.TELEGRAM_CHAT_ID
+        pnlChatId: process.env.TELEGRAM_PNL_CHAT_ID || process.env.TELEGRAM_CHAT_ID,
+        // Announcement alerts older than this (minutes) are only logged, not sent
+        maxSignalAgeMin: numEnv('TELEGRAM_MAX_SIGNAL_AGE_MIN', 60)
     },
     
     // Exchange Monitoring Configuration
@@ -164,6 +166,9 @@ module.exports = {
     
     // Auto-Trading Configuration
     autoTrade: {
+        // Never trade a signal published longer ago than this (seconds). Guards against old
+        // notices that look "new" to the bot (first run, restart, a proxy missing the baseline).
+        maxSignalAgeSec: numEnv('AUTO_TRADE_MAX_SIGNAL_AGE_SEC', 60),
         // ENABLE_AUTO_ORDER is accepted as an alias
         enabled: parseBooleanEnv(process.env.AUTO_TRADE_ENABLED, false) || parseBooleanEnv(process.env.ENABLE_AUTO_ORDER, false),
         upbitListing: process.env.AUTO_TRADE_UPBIT_LISTING !== 'false',
@@ -271,6 +276,9 @@ module.exports = {
     // Storage Configuration
     storage: {
         positionsFile: 'data/positions.json',
+        // Persistent "already seen" notice keys (restart must not re-alert / re-trade old notices)
+        seenUpbitFile: 'data/seen_upbit.json',
+        seenBithumbFile: 'data/seen_bithumb.json',
         binanceFile: 'data/sent_announcements_binance.json',
         upbitFile: 'data/sent_announcements_upbit.json',
         bithumbFile: 'data/sent_announcements_bithumb.json'

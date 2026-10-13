@@ -192,6 +192,20 @@ class LightningAutoTrader {
         const exchange = String(announcement.exchange || '').toUpperCase();
         const category = String(announcement.category || '').toUpperCase();
 
+        // Freshness guard: trade only signals published moments ago. Without it, any notice the
+        // bot had not seen before (first run, restart, a proxy missing the baseline poll) was
+        // traded as if new — on 2026-10-13 a restart opened 6 demo positions on 1h–5 week old news.
+        const publishedAt = Number(announcement.releaseDate);
+        const ageMs = Date.now() - publishedAt;
+        if (!(publishedAt > 0)) {
+            console.log(`⏭️ [TRADE] skip ${exchange} ${category}: no publication time — ${announcement.title}`);
+            return null;
+        }
+        if (ageMs > this.config.maxSignalAgeSec * 1000) {
+            console.log(`⏭️ [TRADE] skip ${exchange} ${category}: published ${Math.round(ageMs / 1000)}s ago (> ${this.config.maxSignalAgeSec}s) — ${announcement.title}`);
+            return null;
+        }
+
         if (exchange === 'UPBIT') {
             if (category === 'LISTING') {
                 if (!this.config.upbitListing) return null;
