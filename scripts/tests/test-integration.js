@@ -1,4 +1,6 @@
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 const config = require('../../config/config');
 const lightningTrader = require('../../modules/automation/lightning-trader');
 
@@ -11,7 +13,59 @@ async function test() {
     ⚡ LIGHTNING TRADER INTEGRATION TEST
     ====================================
     `);
-    
+
+    // Test 0: Entrypoint existence (npm start depends on this)
+    console.log(`\n✅ Test 0: Entrypoint Exists`);
+    const entryPath = path.join(__dirname, '../../index-new.js');
+    if (!fs.existsSync(entryPath)) {
+        throw new Error(`Missing entrypoint file required by npm start: ${entryPath}`);
+    }
+
+    const entryModule = require('../../index-new.js');
+    if (!entryModule || typeof entryModule.start !== 'function') {
+        throw new Error(`Expected index-new.js to export { start() }`);
+    }
+
+    // Test 0.1: Config boolean parsing (env "false" must disable monitors)
+    console.log(`\n✅ Test 0.1: Config Boolean Parsing`);
+    function loadConfigWithEnv(overrides) {
+        const configPath = require.resolve('../../config/config');
+        const previous = {};
+
+        for (const [key, value] of Object.entries(overrides)) {
+            previous[key] = process.env[key];
+            process.env[key] = value;
+        }
+
+        delete require.cache[configPath];
+        const cfg = require('../../config/config');
+
+        for (const key of Object.keys(overrides)) {
+            if (previous[key] === undefined) {
+                delete process.env[key];
+            } else {
+                process.env[key] = previous[key];
+            }
+        }
+
+        return cfg;
+    }
+
+    const cfgFalse = loadConfigWithEnv({
+        BINANCE_ENABLED: 'false',
+        UPBIT_ENABLED: 'false',
+        BITHUMB_ENABLED: 'false'
+    });
+    if (cfgFalse.exchanges.binance.enabled !== false || typeof cfgFalse.exchanges.binance.enabled !== 'boolean') {
+        throw new Error(`BINANCE_ENABLED="false" must produce boolean false`);
+    }
+    if (cfgFalse.exchanges.upbit.enabled !== false || typeof cfgFalse.exchanges.upbit.enabled !== 'boolean') {
+        throw new Error(`UPBIT_ENABLED="false" must produce boolean false`);
+    }
+    if (cfgFalse.exchanges.bithumb.enabled !== false || typeof cfgFalse.exchanges.bithumb.enabled !== 'boolean') {
+        throw new Error(`BITHUMB_ENABLED="false" must produce boolean false`);
+    }
+
     // Test 1: Check module loading
     console.log(`\n✅ Test 1: Module Loading`);
     console.log(`   - Config loaded: ${!!config.autoTrade}`);

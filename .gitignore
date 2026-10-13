@@ -14,3 +14,6 @@ Thumbs.db
 
 # Data files (optional - remove if you want to track them)
 data/
+
+# SSH key for upbit-tunnels
+secrets/
