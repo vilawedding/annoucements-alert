@@ -2,6 +2,10 @@ const axios = require('axios');
 const crypto = require('crypto');
 const https = require('https');
 const config = require('../../config/config');
+const priceStream = require('./price-stream');
+
+// Max age of a streamed price that may be used to size an order instead of a REST call.
+const STREAM_PRICE_MAX_AGE_MS = parseInt(process.env.AUTO_TRADE_STREAM_PRICE_MAX_AGE_MS || '2000', 10);
 
 /**
  * Binance USDS-M Futures Trading Module
@@ -152,6 +156,36 @@ const marketData = {
         return await makeRequest('GET', '/fapi/v1/exchangeInfo');
     },
 
+    /**
+     * One exchangeInfo call (~1s, large payload) fills the tradable-symbol cache and
+     * returns precision for every tradable perpetual, so no order has to download it.
+     */
+    async loadTradableSymbolPrecisions() {
+        const exchangeInfo = await this.getExchangeInfo();
+        const precisions = new Map();
+
+        // Crypto perpetuals only: TRADIFI_PERPETUAL are stocks/metals whose tickers can
+        // collide with coins (COINUSDT, GMEUSDT, HOODUSDT).
+        // PENDING_TRADING = futures listing already announced: precision is known before
+        // trading opens, so a signal right at open doesn't fall back to a ~1s exchangeInfo download.
+        for (const s of exchangeInfo?.symbols || []) {
+            if (!s || s.contractType !== 'PERPETUAL') continue;
+            if (s.status === 'TRADING' || s.status === 'PENDING_TRADING') {
+                precisions.set(s.symbol, utils.extractPrecision(s));
+            }
+        }
+
+        // Fast pre-filter (isSymbolTradableCached) = "known crypto perpetual". Pending symbols
+        // are included so one that opens between refreshes is not rejected locally; if it is
+        // not open yet, Binance rejects the order and sniperRetry retries.
+        tradableSymbolsCache = {
+            symbols: new Set(precisions.keys()),
+            lastFetch: Date.now()
+        };
+
+        return precisions;
+    },
+
     async getTradableSymbols(forceRefresh = false) {
         const now = Date.now();
         const cacheFresh = tradableSymbolsCache.symbols && (now - tradableSymbolsCache.lastFetch) < 10000;
@@ -203,6 +237,11 @@ const account = {
     
     async changeMarginType(symbol, marginType) {
         return await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType }, true);
+    },
+
+    /** Fills of this account on a symbol since startTime (realizedPnl + commission per fill). */
+    async getUserTrades(symbol, startTime, limit = 1000) {
+        return await makeRequest('GET', '/fapi/v1/userTrades', { symbol, startTime, limit }, true);
     }
 };
 
@@ -316,6 +355,89 @@ const trading = {
 
         return await makeRequest('POST', '/fapi/v1/algoOrder', params, true);
     },
+
+    /**
+     * Reduce-only STOP_MARKET / TAKE_PROFIT_MARKET straight on the Algo Order API.
+     * Production and demo both reject these on /fapi/v1/order with -4120 (checked on demo
+     * 2026-10-13), so going algo-first saves one round trip per protective order.
+     * Returns { algoId, ... }.
+     */
+    async placeConditional({ symbol, side, type, stopPrice, quantity, positionSide = 'BOTH' }) {
+        return await this.placeAlgoOrder({
+            symbol, side, type, positionSide, quantity, stopPrice,
+            reduceOnly: true,
+            workingType: 'MARK_PRICE'
+        });
+    },
+
+    async cancelAlgoOrder(algoId) {
+        return await makeRequest('DELETE', '/fapi/v1/algoOrder', { algoId }, true);
+    },
+
+    /** Cancels every resting regular and algo (conditional) order on the symbol. */
+    async cancelAllSymbolOrders(symbol) {
+        const results = await Promise.allSettled([
+            makeRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol }, true),
+            makeRequest('DELETE', '/fapi/v1/algoOpenOrders', { symbol }, true)
+        ]);
+        return results.map(r => (r.status === 'fulfilled' ? 'ok' : (r.reason?.response?.data?.msg || r.reason?.message)));
+    },
+
+    /**
+     * Market entry only (protective orders are the position manager's job).
+     * side: 'BUY' (long) | 'SELL' (short). Returns { order, quantity, entryPrice, referencePrice }.
+     * entryPrice: avgPrice from the order, else the position's entryPrice (demo answers
+     * MARKET orders without avgPrice), else the reference price used for sizing.
+     */
+    async marketEntry(symbol, side, usdtAmount, precision, positionSide = 'BOTH') {
+        if (!precision) {
+            precision = await utils.getSymbolPrecision(symbol);
+        }
+
+        const referencePrice = await utils.getReferencePrice(symbol);
+        if (!(referencePrice > 0)) throw new Error('Invalid price');
+
+        const quantity = utils.formatQuantity(
+            usdtAmount / referencePrice,
+            precision.stepSize || precision.quantityPrecision
+        );
+        if (!(quantity > 0)) throw new Error(`Quantity rounds to 0 (amount=${usdtAmount} USDT, price=${referencePrice})`);
+
+        const order = side === 'SELL'
+            ? await this.marketSell(symbol, quantity, positionSide)
+            : await this.marketBuy(symbol, quantity, positionSide);
+
+        let entryPrice = parseFloat(order.avgPrice);
+        if (!(entryPrice > 0)) {
+            try {
+                const positions = await account.getPositionInfo(symbol);
+                const position = positions.find(p => p.symbol === symbol && p.positionSide === positionSide);
+                const positionEntryPrice = position ? parseFloat(position.entryPrice) : NaN;
+                if (positionEntryPrice > 0) entryPrice = positionEntryPrice;
+            } catch (_) {}
+        }
+        if (!(entryPrice > 0)) entryPrice = referencePrice;
+
+        const executedQty = parseFloat(order.executedQty);
+        return {
+            order,
+            quantity: executedQty > 0 ? executedQty : quantity,
+            entryPrice,
+            referencePrice
+        };
+    },
+
+    async marketClose(symbol, side, quantity, positionSide = 'BOTH') {
+        return await this.placeOrder({
+            symbol,
+            side,
+            type: 'MARKET',
+            positionSide,
+            quantity,
+            reduceOnly: true,
+            newOrderRespType: 'RESULT'
+        });
+    },
     
     /**
      * Market Buy with Take Profit and Stop Loss
@@ -329,8 +451,7 @@ const trading = {
             precision = await utils.getSymbolPrecision(symbol);
         }
         
-        const priceData = await marketData.getPrice(symbol);
-        const currentPrice = parseFloat(priceData.price);
+        const currentPrice = await utils.getReferencePrice(symbol);
         
         if (currentPrice <= 0) throw new Error('Invalid price');
         
@@ -508,8 +629,7 @@ const trading = {
             precision = await utils.getSymbolPrecision(symbol);
         }
         
-        const priceData = await marketData.getPrice(symbol);
-        const currentPrice = parseFloat(priceData.price);
+        const currentPrice = await utils.getReferencePrice(symbol);
         
         if (currentPrice <= 0) throw new Error('Invalid price');
         
@@ -682,6 +802,10 @@ const utils = {
             throw new Error(`Symbol ${symbol} not found`);
         }
         
+        return utils.extractPrecision(symbolInfo);
+    },
+
+    extractPrecision(symbolInfo) {
         // Extract filter values for proper formatting
         const lotSize = symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE');
         const priceFilter = symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER');
@@ -697,6 +821,18 @@ const utils = {
         };
     },
     
+    /**
+     * Price used to size the order: streamed last price when fresh (saves one REST
+     * round trip on the critical path), otherwise GET /ticker/price.
+     */
+    async getReferencePrice(symbol) {
+        const streamed = priceStream.getFreshPrice(symbol, STREAM_PRICE_MAX_AGE_MS);
+        if (streamed) return streamed;
+
+        const priceData = await marketData.getPrice(symbol);
+        return parseFloat(priceData.price);
+    },
+
     formatQuantity(quantity, stepSize) {
         if (!stepSize || stepSize <= 0) return parseFloat(quantity.toFixed(8));
         const precision = Math.log10(1 / stepSize);
@@ -727,5 +863,8 @@ module.exports = {
     isSymbolTradableCached: marketData.isSymbolTradableCached.bind(marketData),
     getPositionInfo: account.getPositionInfo,
     changeInitialLeverage: account.changeInitialLeverage,
-    getSymbolPrecision: utils.getSymbolPrecision
+    getSymbolPrecision: utils.getSymbolPrecision,
+    loadTradableSymbolPrecisions: marketData.loadTradableSymbolPrecisions.bind(marketData),
+    testConnectivity: marketData.testConnectivity,
+    priceStream
 };

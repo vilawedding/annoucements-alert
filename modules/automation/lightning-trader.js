@@ -4,6 +4,11 @@ const telegram = require('../notifications');
 const storage = require('../storage');
 const perfOptimizer = require('./performance-optimizer');
 const fastCache = require('./fast-cache');
+const { createPositionManager } = require('../trading/position-manager');
+
+const PRECISION_REFRESH_MS = 5 * 60 * 1000;
+const CONNECTION_KEEPALIVE_MS = 15000;
+const WARM_SOCKETS = 3;
 
 /**
  * Lightning-Fast Auto Trader
@@ -20,8 +25,54 @@ class LightningAutoTrader {
         this.marketFirstAsyncProtection = process.env.AUTO_TRADE_MARKET_FIRST_ASYNC_PROTECTION !== 'false';
         this.retryCount = Math.max(0, parseInt(process.env.AUTO_TRADE_RETRY_COUNT || '1', 10));
         this.retryDelayMs = Math.max(0, parseInt(process.env.AUTO_TRADE_RETRY_DELAY_MS || '50', 10));
+        // Market entry here, then protective orders / trailing / PnL in the position manager.
+        // POSITION_MANAGER_ENABLED=false keeps the old one-shot market+TP/SL path.
+        this.positionManager = config.positionManager.enabled ? createPositionManager() : null;
     }
     
+    /**
+     * Take everything that is not signal-specific off the order's critical path:
+     *  - precision for all tradable perpetuals (exchangeInfo is ~1s to download)
+     *  - streamed prices (skips GET /ticker/price before the order)
+     *  - a periodic ping so the keep-alive TLS connection to fapi stays open
+     *    (a fresh TLS handshake costs ~150ms+)
+     */
+    async warmup() {
+        // Started even with auto-trade off: positions left open by a previous run keep their
+        // trailing SL / PnL tracking.
+        if (this.positionManager) {
+            await this.positionManager.start().catch(error => console.error(`[WARMUP] position manager start failed: ${error.message}`));
+        }
+
+        if (!this.config.enabled) return;
+
+        const refreshPrecisions = async () => {
+            try {
+                const precisions = await this.binance.loadTradableSymbolPrecisions();
+                precisions.forEach((precision, symbol) => fastCache.cacheSymbolPrecision(symbol, precision));
+                return precisions.size;
+            } catch (error) {
+                console.error(`[WARMUP] precision preload failed: ${error.message}`);
+                return 0;
+            }
+        };
+
+        this.binance.priceStream.start();
+
+        const count = await refreshPrecisions();
+        console.log(`⚡ [WARMUP] Preloaded precision for ${count} Binance Futures symbols`);
+
+        setInterval(refreshPrecisions, PRECISION_REFRESH_MS);
+        // Concurrent pings keep several sockets warm (order + parallel tokens + leverage).
+        const keepWarm = () => {
+            for (let i = 0; i < WARM_SOCKETS; i++) {
+                this.binance.testConnectivity().catch(() => {});
+            }
+        };
+        keepWarm();
+        setInterval(keepWarm, CONNECTION_KEEPALIVE_MS);
+    }
+
     /**
      * Queue telegram message to send async (non-blocking)
      */
@@ -37,7 +88,7 @@ class LightningAutoTrader {
         while (this.telegramQueue.length > 0) {
             const message = this.telegramQueue.shift();
             try {
-                await telegram.sendMessage(message);
+                await telegram.sendMessage(message, 'order');
             } catch (error) {
                 console.error(`[TELEGRAM] send failed: ${error.message}`);
             }
@@ -104,6 +155,33 @@ class LightningAutoTrader {
     }
     
     /**
+     * Leverage / size / risk for a signal. Listings use the global AUTO_TRADE_* and
+     * POSITION_* / TRAILING_* settings (risk=null); the Upbit SHORT strategies have their own
+     * profile (config.strategies) with SL/TP given in price % and converted to ROI here.
+     */
+    strategyProfile(exchange, category) {
+        let key = null;
+        if (exchange === 'UPBIT') key = category === 'WARNING' ? 'upbitWarning' : category === 'DELISTING' ? 'upbitDelisting' : null;
+        if (exchange === 'BINANCE' && category === 'LISTING') key = 'binanceListing';
+        if (!key) {
+            return { name: 'default', leverage: this.config.leverage, amount: this.config.amount, risk: null };
+        }
+        const p = config.strategies[key];
+        return {
+            name: key,
+            leverage: p.leverage,
+            amount: p.amount > 0 ? p.amount : this.config.amount,
+            risk: {
+                name: key,
+                initialSlRoiPct: p.slPct * p.leverage,
+                tpRoiPct: p.tpPct > 0 ? p.tpPct * p.leverage : 0,
+                trailing: null,
+                maxHoldMin: p.maxHoldMin
+            }
+        };
+    }
+
+    /**
      * Execute trade with maximum speed
      */
     async executeLight(announcement) {
@@ -115,16 +193,29 @@ class LightningAutoTrader {
         const category = String(announcement.category || '').toUpperCase();
 
         if (exchange === 'UPBIT') {
-            if (!this.config.upbitListing) return null;
-            if (category !== 'LISTING') return null;
+            if (category === 'LISTING') {
+                if (!this.config.upbitListing) return null;
+                if (this.config.upbitKrwOnly && !/KRW/.test(announcement.title || '')) {
+                    console.log(`⏭️ [TRADE] skip Upbit listing without KRW market (AUTO_TRADE_UPBIT_KRW_ONLY): ${announcement.title}`);
+                    return null;
+                }
+            } else if (category === 'WARNING') {
+                if (!this.config.upbitWarning) return null;
+            } else if (category === 'DELISTING') {
+                if (!this.config.upbitDelisting) return null;
+            } else {
+                return null;
+            }
         } else if (exchange === 'BITHUMB') {
             if (!this.config.bithumbListing) return null;
             if (category !== 'LISTING') return null;
         } else if (exchange === 'BINANCE') {
             if (category === 'DELISTING') {
                 if (!this.config.binanceDelisting) return null;
-            } else if (['LISTING', 'NEW_PAIRS'].includes(category)) {
+            } else if (category === 'LISTING') {
                 if (!this.config.binanceListing) return null;
+            } else if (category === 'NEW_PAIRS') {
+                if (!this.config.binanceNewPairs) return null;
             } else {
                 return null;
             }
@@ -132,7 +223,9 @@ class LightningAutoTrader {
             return null;
         }
         
-        const tokens = (announcement.tokens && announcement.tokens.length > 0)
+        // Monitors already extracted tokens; an empty list means "no safe ticker found"
+        // and must not fall back to guessing from the title.
+        const tokens = Array.isArray(announcement.tokens)
             ? announcement.tokens
             : this.extractTokensFast(announcement.title || '');
         if (tokens.length === 0) return null;
@@ -143,13 +236,15 @@ class LightningAutoTrader {
                 ? this.config.takeProfitPercentBithumb
                 : this.config.takeProfitPercentUpbit;
         
-        const isShort = category === 'DELISTING';
+        const isShort = category === 'DELISTING' || category === 'WARNING';
+        const profile = this.strategyProfile(exchange, category);
         const executionStartTime = Date.now();
         const tradeResults = [];
         const announcementHash = announcement.hash;
         const orderExecutionTime = Date.now();
         
-        for (const token of tokens) {
+        // All tokens of one announcement are ordered in parallel, not one after another.
+        await Promise.all(tokens.map(async (token) => {
             const symbol = `${token}USDT`;
             const tradeStartTime = Date.now();
             
@@ -179,16 +274,15 @@ class LightningAutoTrader {
                     throw new Error('No precision data');
                 }
                 
-                // Set leverage (fast - non-blocking)
-                this.binance.changeInitialLeverage(symbol, this.config.leverage).catch((error) => {
-                    console.warn(`[LEVERAGE] ${symbol} set failed: ${error.message}`);
-                });
-                
+                const side = isShort ? 'SELL' : 'BUY';
+
                 // Place order with TP/SL using fast retry
-                const tradeFn = isShort
+                const tradeFn = this.positionManager
+                    ? () => this.binance.trading.marketEntry(symbol, side, profile.amount, precision)
+                    : isShort
                     ? () => this.binance.trading.marketSellWithTPSL(
                         symbol,
-                        this.config.amount,
+                        profile.amount,
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
@@ -197,7 +291,7 @@ class LightningAutoTrader {
                     )
                     : () => this.binance.trading.marketBuyWithTPSL(
                         symbol,
-                        this.config.amount,
+                        profile.amount,
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
@@ -205,25 +299,53 @@ class LightningAutoTrader {
                         { asyncProtection: this.marketFirstAsyncProtection }
                     );
 
-                const order = await this.sniperRetry(tradeFn);
+                const orderPromise = this.sniperRetry(tradeFn);
+
+                // Set leverage only after the order request is on the wire: fired first, it took
+                // the warm keep-alive socket and pushed the order onto a fresh TLS handshake.
+                // (It never applied to this order anyway — both requests were already racing.)
+                // setImmediate: runs after the order's promise chain (all microtasks) has dispatched it.
+                setImmediate(() => {
+                    this.binance.changeInitialLeverage(symbol, profile.leverage).catch((error) => {
+                        console.warn(`[LEVERAGE] ${symbol} set failed: ${error.message}`);
+                    });
+                });
+
+                const order = await orderPromise;
                 const tradeDuration = Date.now() - tradeStartTime;
+
+                // Entry is filled: hand it to the position manager (SL/TP + trailing + PnL).
+                let protection = null;
+                if (this.positionManager) {
+                    protection = await this.positionManager.open({
+                        symbol,
+                        side,
+                        quantity: order.quantity,
+                        entryPrice: order.entryPrice,
+                        leverage: profile.leverage,
+                        source: { exchange, category, title: announcement.title || '', hash: announcementHash || null },
+                        risk: profile.risk
+                    });
+                }
+                const filled = order.order || order;
                 
                 const result = {
                     token,
                     symbol,
                     success: true,
-                    orderId: order.orderId,
-                    avgPrice: order.avgPrice,
-                    executedQty: order.executedQty,
+                    orderId: filled.orderId,
+                    avgPrice: filled.avgPrice,
+                    executedQty: filled.executedQty || order.quantity,
                     quantity: order.quantity,
                     duration: tradeDuration,
-                    leverage: this.config.leverage,
-                    amount: this.config.amount,
+                    leverage: profile.leverage,
+                    amount: profile.amount,
                     entryPrice: order.entryPrice,
-                    stopLoss: order.stopLossPrice,
-                    takeProfit: order.takeProfitPrice,
-                    stopLossOrderId: order.stopLossOrderId,
-                    takeProfitOrderId: order.takeProfitOrderId
+                    stopLoss: protection ? protection.slPrice : order.stopLossPrice,
+                    takeProfit: protection ? protection.tpPrice : order.takeProfitPrice,
+                    stopLossOrderId: protection ? protection.slAlgoId : order.stopLossOrderId,
+                    takeProfitOrderId: protection ? protection.tpAlgoId : order.takeProfitOrderId,
+                    protectionError: protection ? protection.slError : null
                 };
                 
                 tradeResults.push(result);
@@ -264,7 +386,7 @@ class LightningAutoTrader {
                 const errorMessage = telegram.createErrorMessage(token, symbol, error.message);
                 this.queueTelegramMessage(errorMessage);
             }
-        }
+        }));
         
         const totalDuration = Date.now() - executionStartTime;
         perfOptimizer.recordMetric('tradingExecution', totalDuration);
