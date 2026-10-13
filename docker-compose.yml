@@ -1,0 +1,54 @@
+services:
+  announcement-bot:
+    build: .
+    image: announcement-bot:latest
+    container_name: announcement-bot
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      PORT: 3003
+      # Tunnels are reached by service name inside the compose network
+      UPBIT_SSH_TUNNEL_HOST: upbit-tunnels
+      # Proxy list file mounted below (one proxy per line)
+      UPBIT_PROXIES_FILE: /app/secrets/upbit_proxies.txt
+    ports:
+      - "3003:3003"
+    volumes:
+      # Keep the existing storage so already-seen announcements are not re-traded
+      - ./data:/app/data
+      # One proxy per line (see config/upbit_proxies.example.txt). Create it, even empty.
+      - ${UPBIT_PROXIES_FILE_HOST:-./secrets/upbit_proxies.txt}:/app/secrets/upbit_proxies.txt:ro
+    depends_on:
+      - upbit-tunnels
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # One SOCKS5 tunnel per VM in UPBIT_SSH_TUNNELS (extra egress IPs for Upbit polling).
+  # Idles when UPBIT_SSH_TUNNELS is empty. Ports are only exposed inside this network.
+  upbit-tunnels:
+    build: ./docker/ssh-tunnels
+    image: upbit-tunnels:latest
+    container_name: upbit-tunnels
+    restart: unless-stopped
+    init: true
+    environment:
+      UPBIT_SSH_TUNNELS: ${UPBIT_SSH_TUNNELS:-}
+      SSH_TUNNEL_BASE_PORT: ${UPBIT_SSH_TUNNEL_BASE_PORT:-1081}
+    volumes:
+      # Private key allowed to log in to every tunnel VM (read-only)
+      - ${UPBIT_SSH_KEY_FILE:-./secrets/upbit_tunnel_key}:/ssh/id_key:ro
+      # Remember VM host keys across restarts
+      - tunnel-known-hosts:/known_hosts
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  tunnel-known-hosts:

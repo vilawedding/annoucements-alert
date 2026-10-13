@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log*
+*.log
+.git
+.gitignore
+.DS_Store
+.claude
+docs
+render.yaml
+
+# Secrets are injected at runtime (env_file), never baked into the image
+.env
+
+# Mounted as a volume at runtime
+data
+secrets
