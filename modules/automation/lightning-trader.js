@@ -279,6 +279,14 @@ class LightningAutoTrader {
                     }
                 }
                 
+                // Contract about to be settled (Binance is delisting this perp): it would be force-closed
+                // before the strategy's time stop. In-memory lookup, no extra request.
+                const deliveryAt = this.binance.getDeliveryTimeCached(symbol);
+                const holdMs = (profile.risk?.maxHoldMin || 60) * 60000;
+                if (deliveryAt && deliveryAt < Date.now() + holdMs) {
+                    throw new Error(`Perp ${symbol} settles ${new Date(deliveryAt).toISOString()}, inside the ${holdMs / 60000}min hold window`);
+                }
+
                 // Get precision for TP/SL calculation
                 const precision = await fastCache.getSymbolPrecision(symbol, this.binance).catch(error => {
                     console.error(`[PRECISION] ${symbol} failed: ${error.message}`);

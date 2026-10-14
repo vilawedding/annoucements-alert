@@ -21,6 +21,8 @@ const API_SECRET = config.binanceFutures.apiSecret;
 // Server time cache for ultra-fast execution (avoid repeated server time calls)
 let serverTimeCache = { time: null, lastFetch: 0, offsetMs: 0 };
 let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
+// symbol -> contract delivery time (ms); a perpetual that Binance is delisting carries a near date
+const deliveryTimes = new Map();
 let isServerTimeSyncing = false;
 
 function syncServerTimeInBackground() {
@@ -172,6 +174,7 @@ const marketData = {
             if (!s || s.contractType !== 'PERPETUAL') continue;
             if (s.status === 'TRADING' || s.status === 'PENDING_TRADING') {
                 precisions.set(s.symbol, utils.extractPrecision(s));
+                deliveryTimes.set(s.symbol, Number(s.deliveryDate) || 0);
             }
         }
 
@@ -212,6 +215,11 @@ const marketData = {
     async isSymbolTradable(symbol, forceRefresh = false) {
         const symbols = await this.getTradableSymbols(forceRefresh);
         return symbols.has(symbol);
+    },
+
+    /** Contract delivery time in ms from the preloaded exchangeInfo (null = unknown). */
+    getDeliveryTimeCached(symbol) {
+        return deliveryTimes.get(symbol) || null;
     },
 
     isSymbolTradableCached(symbol) {
@@ -861,6 +869,7 @@ module.exports = {
     getExchangeInfo: marketData.getExchangeInfo,
     isSymbolTradable: marketData.isSymbolTradable.bind(marketData),
     isSymbolTradableCached: marketData.isSymbolTradableCached.bind(marketData),
+    getDeliveryTimeCached: marketData.getDeliveryTimeCached.bind(marketData),
     getPositionInfo: account.getPositionInfo,
     changeInitialLeverage: account.changeInitialLeverage,
     getSymbolPrecision: utils.getSymbolPrecision,
