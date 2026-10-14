@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('./modules/logging/file-log').install();
 const config = require('./config/config');
 const storage = require('./modules/storage');
 const monitoring = require('./modules/monitoring');
