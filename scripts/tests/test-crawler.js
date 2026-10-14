@@ -191,6 +191,11 @@ test('upbit: warning lifted / extended / caution are never WARNING (no short on 
     assert.strictEqual(upbit.categorize('샌드박스(SAND) 거래 유의 종목 지정 해제 안내'), 'WARNING_LIFTED');
     assert.strictEqual(upbit.categorize('만트라(MANTRA) 거래 유의 종목 지정 기간 연장 안내'), 'WARNING_EXTENDED');
     assert.strictEqual(upbit.categorize('헤데라(HBAR) 유의 촉구 안내'), 'CAUTION');
+    // Pre-2025 wording without 거래
+    assert.strictEqual(upbit.categorize('포튜브(FOR) 유의 종목 지정 안내'), 'WARNING');
+    assert.strictEqual(upbit.categorize('플레이댑(PLA) 유의 종목 지정 기간 연장 안내'), 'WARNING_EXTENDED');
+    assert.strictEqual(upbit.categorize('카바(KAVA), 웨이브(WAVES) 유의 종목 지정 해제 안내'), 'WARNING_LIFTED');
+    assert.strictEqual(upbit.categorize('스택스(STX) 투자 유의 촉구 안내'), 'CAUTION');
     assert.strictEqual(upbit.categorize('아이콘(ICX) 거래지원 종료 안내 (10/19 15:00)'), 'DELISTING');
 });
 

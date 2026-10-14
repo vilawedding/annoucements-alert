@@ -326,9 +326,10 @@ class UpbitMonitor {
         if (compact.includes('거래지원종료안내')) {
             return 'DELISTING';
         }
-        // Investment warning ("거래 유의 종목 지정"). Lifting (해제) is GOOD news and an
+        // Investment warning ("거래 유의 종목 지정"; until late 2024 also "유의 종목 지정" without 거래,
+        // e.g. 포튜브(FOR) 2024-10-29). Lifting (해제) is GOOD news and an
         // extension (기간 연장) is not a fresh signal — never treat them as WARNING (= short).
-        if (compact.includes('거래유의종목지정')) {
+        if (compact.includes('유의종목지정')) {
             if (compact.includes('해제')) return 'WARNING_LIFTED';
             if (compact.includes('연장')) return 'WARNING_EXTENDED';
             return 'WARNING';
