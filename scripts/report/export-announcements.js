@@ -282,8 +282,10 @@ async function fetchBinance() {
 function upbitType(title) {
     const c = String(title || '').replace(/\s+/g, '');
     if (c.includes('신규거래지원안내') || c.includes('디지털자산추가')) return 'LISTING';
-    if (c.includes('거래지원종료안내') || c.includes('거래지원종료및')) return 'DELISTING';
-    if (c.includes('거래유의종목지정')) {
+    // "...KRW 마켓 거래지원 종료(10/10 18:00) 및 ..." (2023 wording, one market only)
+    if (c.includes('거래지원종료안내') || c.includes('거래지원종료및') || /거래지원종료\(\d/.test(c)) return 'DELISTING';
+    // Until late 2024 Upbit wrote "유의 종목 지정" without 거래 (PLA, LINA, FOR 2024-10-29).
+    if (c.includes('유의종목지정')) {
         if (c.includes('해제')) return 'WARNING_LIFTED';
         if (c.includes('연장')) return 'WARNING_EXTENDED';
         return 'WARNING';

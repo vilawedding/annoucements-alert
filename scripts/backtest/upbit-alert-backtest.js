@@ -331,8 +331,9 @@ async function futuresEntry(symbol, releaseMs, entryTs, entryMinuteEnd) {
     };
 }
 
-async function analyse(ev) {
-    const entryTs = ev.releaseMs + LATENCY_MS;
+/** `latencyMs` overrides --latency for this event (e.g. a random lag per trade). */
+async function analyse(ev, latencyMs = LATENCY_MS) {
+    const entryTs = ev.releaseMs + latencyMs;
     if (entryTs + HORIZON_MIN * MIN > Date.now()) return { skip: 'less than 24h of data yet' };
     const minute = Math.floor(ev.releaseMs / MIN) * MIN;
 
