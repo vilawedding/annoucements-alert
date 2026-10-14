@@ -382,6 +382,60 @@ test('binance: delisting without tokens does not block when delist trading is of
     assert.strictEqual(again.announcements.length, 0, 'pending delisting stored, not re-fetched each poll');
 });
 
+test('binance: delistScope separates spot / futures from margin and other delists (2026 titles)', () => {
+    const cases = [
+        ['Binance Will Delist EPIC, QUICK on 2026-10-28', 'SPOT'],
+        ['Binance Futures Will Delist Multiple USDⓈ-M Perpetual Contracts (2026-10-05)', 'FUTURES'],
+        ['Binance Futures Will Delist COIN-M APTUSD and OPUSD Perpetual Contracts (2026-03-25)', 'FUTURES'],
+        ['Binance Margin And Loans Token Delist on 2026-10-02', 'MARGIN'],
+        ['Binance VIP Loan Will Delist TUSD and ALCX from Eligible Collateral Asset List - 2026-03-30', 'MARGIN'],
+        ['Binance Will Delist UTK and Support Rebranding and Airdrop Plan on Binance Alpha', 'OTHER'],
+        ['Notice of Removal of Spot Trading Pair (BTC/RON) - 2026-01-02', 'OTHER']
+    ];
+    for (const [title, scope] of cases) assert.strictEqual(binance.delistScope(title), scope, title);
+});
+
+test('binance: futures delist keeps the multiplier prefix and skips COIN-M contracts', () => {
+    const line = '2026-10-05 09:00 (UTC): USDⓈ-M PROMPTUSDT, PUMPBTCUSDT and 1000000BOBUSDT Perpetual Contracts';
+    assert.deepStrictEqual(binance.filterValidTokens(binance.extractPerpTokens(line)), ['PROMPT', 'PUMPBTC', '1000000BOB']);
+    assert.deepStrictEqual(binance.extractPerpTokens('2026-03-25 09:00 (UTC): COIN-M APTUSD and OPUSD Perpetual Contracts'), []);
+    assert.deepStrictEqual(binance.extractPerpTokens('Binance Futures Will Delist USDⓈ-M AERGOUSDT Perpetual Contract (2026-07-24)'), ['AERGO']);
+});
+
+test('binance: margin delist is alert-only, spot/futures delist carries its scope to the trader', async () => {
+    resetStorage();
+    const prev = { enabled: config.autoTrade.enabled, delisting: config.autoTrade.binanceDelisting };
+    config.autoTrade.enabled = true;
+    config.autoTrade.binanceDelisting = true;
+    const awaited = [];
+    binance.parseDelistDetails = async (code, scope) => {
+        awaited.push([code, scope]);
+        return scope === 'FUTURES' ? ['1000000BOB'] : ['GNS', 'WIN'];
+    };
+    binance.fetchAnnouncements = async (catalogId) => ({
+        name: 'x',
+        articles: catalogId === 161 ? [
+            { id: 11, code: 'fut', title: 'Binance Futures Will Delist Multiple USDⓈ-M Perpetual Contracts (2026-10-05)', releaseDate: Date.now(), catalogId: 161, url: 'u' },
+            { id: 12, code: 'mar', title: 'Binance Margin And Loans Token Delist on 2026-10-02', releaseDate: Date.now(), catalogId: 161, url: 'u' },
+            { id: 13, code: 'spot', title: 'Binance Will Delist EPIC, QUICK on 2026-10-28', releaseDate: Date.now(), catalogId: 161, url: 'u' }
+        ] : []
+    });
+    try {
+        const result = await binance.check();
+        const byCode = Object.fromEntries(result.announcements.map(a => [a.url === 'u' && a.title.includes('Futures') ? 'fut' : a.title.includes('Margin') ? 'mar' : 'spot', a]));
+        assert.strictEqual(byCode.fut.delistScope, 'FUTURES');
+        assert.deepStrictEqual(byCode.fut.tokens, ['1000000BOB']);
+        assert.strictEqual(byCode.spot.delistScope, 'SPOT');
+        assert.deepStrictEqual(byCode.spot.tokens, ['EPIC', 'QUICK'], 'spot tokens come from the title, no page fetch');
+        assert.strictEqual(byCode.mar.delistScope, 'MARGIN');
+        // Only the futures page was awaited; the margin page is resolved in the background.
+        assert.deepStrictEqual(awaited.filter(([, s]) => s === 'FUTURES').map(([c]) => c), ['fut']);
+    } finally {
+        config.autoTrade.enabled = prev.enabled;
+        config.autoTrade.binanceDelisting = prev.delisting;
+    }
+});
+
 test('binance: list URL rotates catalogId cache keys (CloudFront TTL ~120s), never the shared hot key', () => {
     binance.cacheKeyCounter = 0;
     const keys = new Set();
@@ -439,6 +493,32 @@ test('trader never trades a signal older than AUTO_TRADE_MAX_SIGNAL_AGE_SEC', as
         trader.binance.trading.marketEntry = realEntry;
         trader.positionManager = realPm;
         config.autoTrade.enabled = realEnabled;
+    }
+});
+
+test('trader shorts Binance spot/futures delists only, never margin / unknown scope', async () => {
+    const trader = require('../../modules/automation/lightning-trader');
+    const real = { enabled: config.autoTrade.enabled, delisting: config.autoTrade.binanceDelisting, pm: trader.positionManager, entry: trader.binance.trading.marketEntry, skip: trader.fastModeSkipTradableCheck };
+    config.autoTrade.enabled = true;
+    config.autoTrade.binanceDelisting = true;
+    trader.positionManager = {}; // marketEntry path
+    trader.fastModeSkipTradableCheck = true;
+    const ordered = [];
+    trader.binance.trading.marketEntry = async (symbol, side) => { ordered.push([symbol, side]); throw new Error('stop'); };
+    try {
+        const base = { exchange: 'BINANCE', category: 'DELISTING', releaseDate: Date.now() };
+        assert.strictEqual(await trader.executeLight({ ...base, delistScope: 'MARGIN', title: 'Binance Margin And Loans Token Delist on 2026-10-02', tokens: ['GNS'] }), null);
+        assert.strictEqual(await trader.executeLight({ ...base, title: 'no scope (old monitor)', tokens: ['GNS'] }), null);
+        assert.deepStrictEqual(ordered, [], 'no order for margin / unknown delists');
+
+        await trader.executeLight({ ...base, delistScope: 'FUTURES', title: 'Binance Futures Will Delist Multiple USDⓈ-M Perpetual Contracts', tokens: ['1000000BOB'] }).catch(() => {});
+        assert.deepStrictEqual(ordered, [['1000000BOBUSDT', 'SELL']], 'futures delist shorts the multiplier perp');
+    } finally {
+        trader.binance.trading.marketEntry = real.entry;
+        trader.positionManager = real.pm;
+        trader.fastModeSkipTradableCheck = real.skip;
+        config.autoTrade.enabled = real.enabled;
+        config.autoTrade.binanceDelisting = real.delisting;
     }
 });
 

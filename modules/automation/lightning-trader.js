@@ -227,6 +227,11 @@ class LightningAutoTrader {
         } else if (exchange === 'BINANCE') {
             if (category === 'DELISTING') {
                 if (!this.config.binanceDelisting) return null;
+                // Margin/loan/Alpha/pair-removal delists did not move price enough to short.
+                if (!['SPOT', 'FUTURES'].includes(announcement.delistScope)) {
+                    console.log(`⏭️ [TRADE] skip Binance delisting (scope ${announcement.delistScope || 'unknown'}, only SPOT/FUTURES are shorted): ${announcement.title}`);
+                    return null;
+                }
             } else if (category === 'LISTING') {
                 if (!this.config.binanceListing) return null;
             } else if (category === 'NEW_PAIRS') {

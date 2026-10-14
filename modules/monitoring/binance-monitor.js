@@ -7,6 +7,8 @@ const storage = require('../storage');
 const { MonitorHealth, describeHttpError } = require('./monitor-health');
 
 const LIST_URL = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query';
+// Delist notices the trader may short (see delistScope).
+const TRADED_DELIST_SCOPES = new Set(['SPOT', 'FUTURES']);
 const CACHE_KEY_VARIANTS = 1000;
 
 const httpClient = axios.create({
@@ -93,7 +95,33 @@ class BinanceMonitor {
         }
     }
     
-    async parseDelistDetails(articleCode) {
+    /**
+     * Which market a DELISTING notice is about. Only SPOT ("Binance Will Delist X, Y on <date>")
+     * and FUTURES (USDⓈ-M perp settlement) moved price enough to short (backtest 2026-10-14, 5u x10:
+     * +2.3..2.7u/trade); MARGIN/loan delists (+0.27u, 19-loss streaks) and the rest are alert-only.
+     */
+    delistScope(title) {
+        const t = String(title || '');
+        if (/futures|perpetual/i.test(t)) return 'FUTURES';
+        if (/margin|loan/i.test(t)) return 'MARGIN';
+        if (/\bwill delist\b/i.test(t) && !/alpha|convert|earn|copy trading|\bbots?\b/i.test(t)) return 'SPOT';
+        return 'OTHER';
+    }
+
+    /**
+     * USDⓈ-M perp tokens from "2026-10-05 09:00 (UTC): USDⓈ-M PROMPTUSDT, PUMPBTCUSDT and
+     * 1000000BOBUSDT Perpetual Contracts". The contract name is kept whole (1000000BOB, so the
+     * order goes to 1000000BOBUSDT, not BOBUSDT); COIN-M contracts (APTUSD) are not USDT and are skipped.
+     */
+    extractPerpTokens(text) {
+        const tokens = new Set();
+        for (const m of String(text || '').matchAll(/\b([0-9]*[A-Z][A-Z0-9]*?)USDT\b/g)) {
+            if (m[1] !== 'USD') tokens.add(m[1]);
+        }
+        return Array.from(tokens);
+    }
+
+    async parseDelistDetails(articleCode, scope = 'SPOT') {
         try {
             const url = `https://www.binance.com/en/support/announcement/${articleCode}`;
             
@@ -128,6 +156,13 @@ class BinanceMonitor {
 
             if (!content) return [];
 
+            if (scope === 'FUTURES') {
+                // Only the dated settlement lines name the delisted contracts; the rest of the page
+                // mentions unrelated symbols (examples, other products).
+                const lines = cheerio.load(content.replace(/<\/(p|li|tr|div|h\d)>|<br\s*\/?>/gi, '\n')).text().split('\n');
+                return this.extractPerpTokens(lines.filter(l => /perpetual/i.test(l) && /\(UTC\)/.test(l)).join('\n'));
+            }
+
             const $ = cheerio.load(content);
             const textContent = $.text().replace(/\s+/g, ' ');
             
@@ -155,12 +190,12 @@ class BinanceMonitor {
      * actually needs the tokens; otherwise resolve them in the background so the
      * poll loop is not blocked and listing detection keeps running.
      */
-    _needsDelistTokensForTrade() {
-        return config.autoTrade.enabled && config.autoTrade.binanceDelisting;
+    _needsDelistTokensForTrade(scope) {
+        return config.autoTrade.enabled && config.autoTrade.binanceDelisting && TRADED_DELIST_SCOPES.has(scope);
     }
 
-    _resolveDelistTokensInBackground(code, title) {
-        this.parseDelistDetails(code)
+    _resolveDelistTokensInBackground(code, title, scope) {
+        this.parseDelistDetails(code, scope)
             .then(tokens => {
                 const validTokens = this.filterValidTokens(tokens);
                 console.log(`📩 [BINANCE] DELISTING tokens resolved | ${validTokens.length > 0 ? validTokens.join(',') : 'N/A'} | ${title}`);
@@ -193,7 +228,8 @@ class BinanceMonitor {
     filterValidTokens(tokens) {
         return Array.from(new Set(tokens))
             .map(t => String(t || '').toUpperCase().trim())
-            .filter(t => t.length >= 2 && t.length <= 10)
+            // Multiplier perps are longer: 1000000BABYDOGE
+            .filter(t => t.length >= 2 && (t.length <= 10 || (/^\d+[A-Z]/.test(t) && t.length <= 16)))
             .filter(t => !this.blacklist.has(t));
     }
 
@@ -244,18 +280,21 @@ class BinanceMonitor {
             return null;
         }
 
-        const tokens = this.extractTokens(title);
+        const delistScope = category === 'DELISTING' ? this.delistScope(title) : null;
+        // Perp notices name contracts (1000000BOBUSDT): the generic extractor would cut the multiplier.
+        const tokens = delistScope === 'FUTURES' ? this.extractPerpTokens(title) : this.extractTokens(title);
         let pendingDelistTokens = false;
-        
+
         if (category === 'DELISTING' && tokens.length === 0 && /(delist|removal)/i.test(title)) {
-            if (this._needsDelistTokensForTrade()) {
-                const detailedTokens = await this.parseDelistDetails(code);
+            // Wait for the slow article page only for a delist the trader may short.
+            if (this._needsDelistTokensForTrade(delistScope)) {
+                const detailedTokens = await this.parseDelistDetails(code, delistScope);
                 if (detailedTokens.length > 0) {
                     tokens.push(...detailedTokens);
                 }
             } else {
                 pendingDelistTokens = true;
-                this._resolveDelistTokensInBackground(code, title);
+                this._resolveDelistTokensInBackground(code, title, delistScope);
             }
         }
 
@@ -293,6 +332,7 @@ class BinanceMonitor {
             exchange: 'BINANCE',
             catalogId,
             category,
+            delistScope,
             title,
             url,
             symbol,
