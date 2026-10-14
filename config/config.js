@@ -250,6 +250,15 @@ module.exports = {
             tpPct: numEnv('BINANCE_LISTING_TP_PCT', 0),
             maxHoldMin: numEnv('BINANCE_LISTING_MAX_HOLD_MIN', 60)
         },
+        // SHORT "Binance Will Delist X, Y" (backtest 2026-10-14, n=78, 20s latency): hold 240m, wide SL —
+        // SL 3-5% gets swept (win 26-33%), no SL has a 130% squeeze tail. Leverage kept low for that tail.
+        binanceDelisting: {
+            leverage: numEnv('BINANCE_DELISTING_LEVERAGE', 3),
+            amount: numEnv('BINANCE_DELISTING_AMOUNT', 0),
+            slPct: numEnv('BINANCE_DELISTING_SL_PCT', 10),
+            tpPct: numEnv('BINANCE_DELISTING_TP_PCT', 0),
+            maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240)
+        },
         upbitDelisting: {
             leverage: numEnv('UPBIT_DELISTING_LEVERAGE', 5),
             amount: numEnv('UPBIT_DELISTING_AMOUNT', 0),

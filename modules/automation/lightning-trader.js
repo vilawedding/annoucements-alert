@@ -163,6 +163,7 @@ class LightningAutoTrader {
         let key = null;
         if (exchange === 'UPBIT') key = category === 'WARNING' ? 'upbitWarning' : category === 'DELISTING' ? 'upbitDelisting' : null;
         if (exchange === 'BINANCE' && category === 'LISTING') key = 'binanceListing';
+        if (exchange === 'BINANCE' && category === 'DELISTING') key = 'binanceDelisting';
         if (!key) {
             return { name: 'default', leverage: this.config.leverage, amount: this.config.amount, risk: null };
         }
