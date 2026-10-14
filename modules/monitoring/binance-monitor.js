@@ -177,7 +177,16 @@ class BinanceMonitor {
             const token = match[1] || match[2] || match[4];
             if (token) tokens.add(token.toUpperCase());
         }
-        
+
+        // "Binance Will Delist EPIC, QUICK on 2026-10-28": bare uppercase tickers after "Delist",
+        // so the trade does not have to wait for the slow article page.
+        const delistList = title.match(/\bdelist\s+(.+?)\s+on\s+\d{4}-\d{2}-\d{2}/i);
+        if (delistList) {
+            for (const part of delistList[1].split(/\s*(?:,|&|\band\b)\s*/i)) {
+                if (/^[A-Z0-9]{2,10}$/.test(part.trim())) tokens.add(part.trim());
+            }
+        }
+
         return Array.from(tokens);
     }
 
@@ -300,66 +309,70 @@ class BinanceMonitor {
         };
     }
     
-    async check() {
+    /**
+     * Each catalog is fetched and processed independently, so a new announcement is handled
+     * as soon as ITS catalog responds (not after the slower of the two requests).
+     * With `onFound`, announcements are streamed to it immediately and not returned.
+     */
+    async check(onFound) {
         if (!this.config.enabled) {
             return { processed: 0, sent: 0, announcements: [], latestAnnouncement: null };
         }
         
         let processed = 0, sent = 0, latestAnnouncement = null;
         const found = [];
-        
-        try {
-            const catalogResults = await Promise.all(
-                this.catalogIds.map(catalogId => this.fetchAnnouncements(catalogId))
-            );
 
-            for (const catalogData of catalogResults) {
-                try {
-                    const unseenArticles = [];
+        const handleCatalog = async (catalogId) => {
+            try {
+                const catalogData = await this.fetchAnnouncements(catalogId);
+                const unseenArticles = [];
 
-                    for (const article of catalogData.articles) {
-                        const hash = this.articleHash(article);
+                for (const article of catalogData.articles) {
+                    const hash = this.articleHash(article);
 
-                        // Do NOT stop at first known item. API order/caching can be inconsistent,
-                        // and new items may appear after already-known ones.
-                        if (storage.has(hash, 'BINANCE')) {
-                            continue;
-                        }
-
-                        unseenArticles.push({ article, hash });
-                    }
-
-                    if (unseenArticles.length === 0) {
+                    // Do NOT stop at first known item. API order/caching can be inconsistent,
+                    // and new items may appear after already-known ones.
+                    if (storage.has(hash, 'BINANCE')) {
                         continue;
                     }
 
-                    const announcements = await Promise.all(
-                        unseenArticles.map(({ article, hash }) => this.processAnnouncement(article, hash))
-                    );
+                    unseenArticles.push({ article, hash });
+                }
 
-                    processed += unseenArticles.length;
+                if (unseenArticles.length === 0) {
+                    return;
+                }
 
-                    for (const announcement of announcements) {
-                        if (announcement) {
-                            sent++;
+                const announcements = await Promise.all(
+                    unseenArticles.map(({ article, hash }) => this.processAnnouncement(article, hash))
+                );
+
+                processed += unseenArticles.length;
+
+                for (const announcement of announcements) {
+                    if (announcement) {
+                        sent++;
+                        if (!latestAnnouncement) {
+                            latestAnnouncement = announcement;
+                        }
+                        storage.add(announcement.hash, announcement.metadata, 'BINANCE');
+                        if (onFound) {
+                            onFound(announcement);
+                        } else {
                             found.push(announcement);
-                            if (!latestAnnouncement) {
-                                latestAnnouncement = announcement;
-                            }
-                            storage.add(announcement.hash, announcement.metadata, 'BINANCE');
                         }
                     }
-                } catch (error) {
-                    this.health.error('processCatalog', error.message);
                 }
-            }
 
-            if (sent > 0) {
-                storage.saveBinance().catch(() => {});
+                if (announcements.some(Boolean)) {
+                    storage.saveBinance().catch(() => {});
+                }
+            } catch (error) {
+                this.health.error('processCatalog', error.message);
             }
-        } catch (error) {
-            this.health.error('check', error.message);
-        }
+        };
+
+        await Promise.all(this.catalogIds.map(handleCatalog));
         
         return { processed, sent, announcements: found, latestAnnouncement };
     }

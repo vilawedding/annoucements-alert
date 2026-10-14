@@ -116,6 +116,12 @@ function logAnnouncement(a) {
         }
     }
 
+    // Detection lag = detectedAt - releaseDate (publish time reported by the exchange API).
+    const release = Number(a.releaseDate);
+    if (release > 0 && a.detectedAt) {
+        extra += ` | release=${formatTime(release)} | detectLag=${a.detectedAt - release}ms`;
+    }
+
     console.log(`📩 [${a.exchange}] ${formatTime(a.detectedAt)} | ${a.category} | ${tokenText} | ${a.title}${extra}`);
 }
 
@@ -143,19 +149,28 @@ async function executeTrade(a) {
     }
 }
 
+const ALERT_MAX_WAIT_MS = 3000;
+
 function handleAnnouncement(a) {
+    // The order goes out first (started synchronously, before any logging or Telegram work).
+    // Fire-and-forget: awaiting it here would pause polling for the whole trade.
+    let tradeDone = Promise.resolve();
+    if (config.autoTrade.enabled && a._shouldTrade) {
+        tradeDone = executeTrade(a).catch(error => {
+            console.error(`❌ [TRADE] ${a.exchange} ${a.symbol || ''}: ${error.message}`);
+        });
+    }
+
     logAnnouncement(a);
+
+    // Telegram alert only after the order finished, but a slow order delays it by at most ALERT_MAX_WAIT_MS.
     // Old notices first seen now (startup, restart) are logged but not re-sent to Telegram.
     const ageMs = Date.now() - Number(a.releaseDate);
     if (Number(a.releaseDate) > 0 && ageMs <= config.telegram.maxSignalAgeMin * 60000) {
-        telegram.notify(telegram.createAnnouncementMessage(a), 'signal');
-    }
-
-    // Fire-and-forget: awaiting the order here would pause polling for the whole trade.
-    if (config.autoTrade.enabled && a._shouldTrade) {
-        executeTrade(a).catch(error => {
-            console.error(`❌ [TRADE] ${a.exchange} ${a.symbol || ''}: ${error.message}`);
-        });
+        Promise.race([tradeDone, new Promise(resolve => setTimeout(resolve, ALERT_MAX_WAIT_MS))])
+            .then(() => telegram.sendMessage(telegram.createAnnouncementMessage(a), 'signal'))
+            .then(ok => console.log(`📨 [${a.exchange}] telegram signal ${ok ? 'sent' : 'FAILED'} at ${formatTime(Date.now())} | detect→send=${Date.now() - a.detectedAt}ms | release→send=${Date.now() - Number(a.releaseDate)}ms`))
+            .catch(() => {});
     }
 }
 
@@ -163,7 +178,7 @@ async function runMonitorLoop(name, monitor, intervalMs) {
     while (true) {
         const loopStart = Date.now();
         try {
-            const result = await monitor.check();
+            const result = await monitor.check(handleAnnouncement);
             for (const a of result?.announcements || []) {
                 handleAnnouncement(a);
             }
