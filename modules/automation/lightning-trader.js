@@ -165,13 +165,15 @@ class LightningAutoTrader {
         if (exchange === 'BINANCE' && category === 'LISTING') key = 'binanceListing';
         if (exchange === 'BINANCE' && category === 'DELISTING') key = 'binanceDelisting';
         if (!key) {
-            return { name: 'default', leverage: this.config.leverage, amount: this.config.amount, risk: null };
+            return { name: 'default', leverage: this.config.leverage, amount: this.config.amount, notional: this.config.amount * this.config.leverage, risk: null };
         }
         const p = config.strategies[key];
+        const margin = p.amount > 0 ? p.amount : this.config.amount;
         return {
             name: key,
             leverage: p.leverage,
-            amount: p.amount > 0 ? p.amount : this.config.amount,
+            amount: margin,
+            notional: margin * p.leverage,
             risk: {
                 name: key,
                 initialSlRoiPct: p.slPct * p.leverage,
@@ -306,11 +308,11 @@ class LightningAutoTrader {
 
                 // Place order with TP/SL using fast retry
                 const tradeFn = this.positionManager
-                    ? () => this.binance.trading.marketEntry(symbol, side, profile.amount, precision)
+                    ? () => this.binance.trading.marketEntry(symbol, side, profile.notional, precision)
                     : isShort
                     ? () => this.binance.trading.marketSellWithTPSL(
                         symbol,
-                        profile.amount,
+                        profile.notional,
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
@@ -319,7 +321,7 @@ class LightningAutoTrader {
                     )
                     : () => this.binance.trading.marketBuyWithTPSL(
                         symbol,
-                        profile.amount,
+                        profile.notional,
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
