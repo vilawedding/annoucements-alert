@@ -57,12 +57,23 @@ class LightningAutoTrader {
             }
         };
 
+        // Per-symbol max leverage, so an order never asks for more than the symbol allows.
+        const refreshLeverageBrackets = async () => {
+            try {
+                return await this.binance.loadLeverageBrackets();
+            } catch (error) {
+                console.error(`[WARMUP] leverage bracket preload failed: ${error.response?.data?.msg || error.message}`);
+                return 0;
+            }
+        };
+
         this.binance.priceStream.start();
 
-        const count = await refreshPrecisions();
-        console.log(`⚡ [WARMUP] Preloaded precision for ${count} Binance Futures symbols`);
+        const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
+        console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
 
         setInterval(refreshPrecisions, PRECISION_REFRESH_MS);
+        setInterval(refreshLeverageBrackets, PRECISION_REFRESH_MS);
         // Concurrent pings keep several sockets warm (order + parallel tokens + leverage).
         const keepWarm = () => {
             for (let i = 0; i < WARM_SOCKETS; i++) {
@@ -172,12 +183,35 @@ class LightningAutoTrader {
             name: key,
             leverage: p.leverage,
             amount: p.amount > 0 ? p.amount : this.config.amount,
+            slPct: p.slPct,
+            tpPct: p.tpPct,
             risk: {
                 name: key,
                 initialSlRoiPct: p.slPct * p.leverage,
                 tpRoiPct: p.tpPct > 0 ? p.tpPct * p.leverage : 0,
                 trailing: null,
                 maxHoldMin: p.maxHoldMin
+            }
+        };
+    }
+
+    /**
+     * The profile with its leverage capped at the symbol's max for this notional (Binance rejects
+     * a higher one, and the position kept whatever leverage it had). Strategy SL/TP are price %, so
+     * their ROI is recomputed with the capped leverage. Unknown max (brackets not loaded) = as configured.
+     */
+    profileForSymbol(profile, symbol) {
+        const maxLeverage = this.binance.getMaxLeverageCached(symbol, profile.amount);
+        if (!maxLeverage || profile.leverage <= maxLeverage) return profile;
+
+        console.log(`⚙️ [LEVERAGE] ${symbol} max ${maxLeverage}x < ${profile.name} ${profile.leverage}x — using ${maxLeverage}x`);
+        return {
+            ...profile,
+            leverage: maxLeverage,
+            risk: profile.risk && {
+                ...profile.risk,
+                initialSlRoiPct: profile.slPct * maxLeverage,
+                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * maxLeverage : 0
             }
         };
     }
@@ -257,7 +291,7 @@ class LightningAutoTrader {
                 : this.config.takeProfitPercentUpbit;
         
         const isShort = category === 'DELISTING' || category === 'WARNING';
-        const profile = this.strategyProfile(exchange, category);
+        const signalProfile = this.strategyProfile(exchange, category);
         const executionStartTime = Date.now();
         const tradeResults = [];
         const announcementHash = announcement.hash;
@@ -267,7 +301,8 @@ class LightningAutoTrader {
         await Promise.all(tokens.map(async (token) => {
             const symbol = `${token}USDT`;
             const tradeStartTime = Date.now();
-            
+            const profile = this.profileForSymbol(signalProfile, symbol);
+
             try {
                 if (this.fastModeSkipTradableCheck) {
                     const cachedTradable = this.binance.isSymbolTradableCached(symbol);

@@ -23,6 +23,8 @@ let serverTimeCache = { time: null, lastFetch: 0, offsetMs: 0 };
 let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
 // symbol -> contract delivery time (ms); a perpetual that Binance is delisting carries a near date
 const deliveryTimes = new Map();
+// symbol -> leverage brackets [{ initialLeverage, notionalFloor, notionalCap }] ascending by notional
+const leverageBrackets = new Map();
 let isServerTimeSyncing = false;
 
 function syncServerTimeInBackground() {
@@ -241,6 +243,37 @@ const account = {
     
     async changeInitialLeverage(symbol, leverage) {
         return await makeRequest('POST', '/fapi/v1/leverage', { symbol, leverage }, true);
+    },
+
+    /**
+     * One signed call for every symbol's leverage brackets (this account's, so it reflects any
+     * per-account limits), cached so an order never waits on it. Returns the number of symbols.
+     */
+    async loadLeverageBrackets() {
+        const data = await makeRequest('GET', '/fapi/v1/leverageBracket', {}, true);
+        for (const entry of Array.isArray(data) ? data : []) {
+            const brackets = (entry?.brackets || [])
+                .map(b => ({
+                    initialLeverage: Number(b.initialLeverage),
+                    notionalFloor: Number(b.notionalFloor) || 0,
+                    notionalCap: Number(b.notionalCap) || Infinity
+                }))
+                .filter(b => b.initialLeverage > 0)
+                .sort((a, b) => a.notionalFloor - b.notionalFloor);
+            if (entry?.symbol && brackets.length) leverageBrackets.set(entry.symbol, brackets);
+        }
+        return leverageBrackets.size;
+    },
+
+    /**
+     * Max leverage Binance allows for a position of this notional on the symbol
+     * (null = brackets not loaded / unknown symbol, e.g. a listing newer than the last refresh).
+     */
+    getMaxLeverageCached(symbol, notional = 0) {
+        const brackets = leverageBrackets.get(symbol);
+        if (!brackets) return null;
+        const bracket = brackets.find(b => notional < b.notionalCap) || brackets[brackets.length - 1];
+        return bracket.initialLeverage;
     },
     
     async changeMarginType(symbol, marginType) {
@@ -872,6 +905,8 @@ module.exports = {
     getDeliveryTimeCached: marketData.getDeliveryTimeCached.bind(marketData),
     getPositionInfo: account.getPositionInfo,
     changeInitialLeverage: account.changeInitialLeverage,
+    loadLeverageBrackets: account.loadLeverageBrackets,
+    getMaxLeverageCached: account.getMaxLeverageCached,
     getSymbolPrecision: utils.getSymbolPrecision,
     loadTradableSymbolPrecisions: marketData.loadTradableSymbolPrecisions.bind(marketData),
     testConnectivity: marketData.testConnectivity,
