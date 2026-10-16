@@ -134,14 +134,22 @@ class UpbitMonitor {
             this.pool.reportSuccess(egress, Date.now() - startedAt);
             this.health.success();
             const notices = response.data?.data?.notices || [];
-            return notices.map(notice => ({
+            const result = notices.map(notice => ({
                 ...notice,
                 exchange: 'UPBIT',
                 title: notice.title,
                 url: 'https://upbit.com/notice',
                 releaseDate: new Date(notice.listed_at).getTime()
             }));
+            // Response facts for the poll trace (cache state / age); not enumerable so spreading
+            // or JSON-ing the array is unaffected.
+            const h = response.headers || {};
+            Object.defineProperty(result, 'pollMeta', {
+                value: { status: response.status, cache: h['cf-cache-status'] || '-', age: h.age ?? '-' }
+            });
+            return result;
         } catch (error) {
+            this.lastErrorStatus = error?.response?.status || error?.code || 'ERR';
             // 429 = over limit; 418 = temporarily banned after repeated 429s (ban grows on repeat).
             this.pool.reportError(egress, error?.response?.status);
             this.health.error(sourceKey, describeHttpError(error));
@@ -211,17 +219,26 @@ class UpbitMonitor {
 
         const tick = () => {
             setTimeout(tick, this._nextPollDelay());
-            if (inFlight >= maxInFlight) return;
+            if (inFlight >= maxInFlight) { this._tracePoll({ t: Date.now(), skip: 'in-flight' }); return; }
 
-            const egress = this.pool.acquire();
-            if (!egress) return; // every IP busy/cooling: skip rather than overspend one IP
+            let egress = this.pool.acquire();
+            if (!egress) { this._tracePoll({ t: Date.now(), skip: 'no-ip' }); return; } // every IP busy/cooling: skip rather than overspend one IP
 
             inFlight++;
-            const startedAt = Date.now();
+            let startedAt = Date.now();
             const variant = this._nextFreshVariant();
-            this.fetchAnnouncementsFromSource(variant.os, true, requestTimeoutMs, variant.perPage, egress)
-                .then((articles) => {
+            this._fetchWithFailover(variant, requestTimeoutMs, egress)
+                .then(({ articles, egress: usedEgress, startedAt: usedStartedAt }) => {
+                    egress = usedEgress;
+                    startedAt = usedStartedAt;
                     const finishedAt = Date.now();
+                    const meta = articles.pollMeta;
+                    this._tracePoll({
+                        t: startedAt, end: finishedAt, ip: egress.id, os: variant.os, pp: variant.perPage,
+                        status: meta ? meta.status : (this.lastErrorStatus || 'ERR'),
+                        cache: meta ? meta.cache : '-', age: meta ? meta.age : '-',
+                        ids: articles.map(a => a.id)
+                    });
                     const unseen = this._sortOldestFirst(articles.filter(a => !this._isSeen(a)));
                     for (const article of unseen) {
                         const announcement = this.processAnnouncement(article, 'REST');
@@ -231,6 +248,7 @@ class UpbitMonitor {
                         announcement._apiCallFinishedAt = new Date(finishedAt);
                         announcement._apiFetchMs = finishedAt - startedAt;
                         announcement._apiToDetectMs = announcement.detectedAt - startedAt;
+                        this._logPollTrace(article, announcement);
                         this._store(announcement);
                         onAnnouncement(announcement);
                     }
@@ -288,6 +306,62 @@ class UpbitMonitor {
                     });
             }
         });
+    }
+
+    /**
+     * One poll slot. If the chosen IP fails (timeout, proxy error, 429/418 - it is benched by the
+     * pool), the same request goes out again right away through another free IP instead of
+     * waiting for the next tick; up to MAX_FAILOVERS extra attempts, each on a different IP.
+     * Failed attempts are traced too. Resolves with the attempt that produced a response (or the last one).
+     */
+    async _fetchWithFailover(variant, timeoutMs, firstEgress) {
+        const MAX_FAILOVERS = 2;
+        let egress = firstEgress;
+        let startedAt = Date.now();
+        let articles = [];
+        for (let attempt = 0; ; attempt++) {
+            articles = await this.fetchAnnouncementsFromSource(variant.os, true, timeoutMs, variant.perPage, egress);
+            if (articles.pollMeta || attempt >= MAX_FAILOVERS) break;
+
+            this._tracePoll({
+                t: startedAt, end: Date.now(), ip: egress.id, os: variant.os, pp: variant.perPage,
+                status: this.lastErrorStatus || 'ERR', cache: '-', age: '-', ids: [], failover: true
+            });
+            const next = this.pool.acquire();
+            if (!next) break; // no other IP is free right now
+            console.warn(`🔁 [UPBIT] ${egress.id} failed (${this.lastErrorStatus || 'ERR'}), retrying via ${next.id}`);
+            egress = next;
+            startedAt = Date.now();
+        }
+        return { articles, egress, startedAt };
+    }
+
+    // ==================== POLL TRACE ====================
+    // Ring buffer of the last ~2 minutes of REST polls. When a new notice is detected, the polls
+    // from its publish time on are printed, so "API publishes late" can be told apart from
+    // "bot missed it" (no poll in the gap / 429 / skipped) per notice.
+
+    _tracePoll(record) {
+        const buf = this.pollTrace || (this.pollTrace = []);
+        buf.push(record);
+        const cutoff = Date.now() - 120000;
+        while (buf.length && buf[0].t < cutoff) buf.shift();
+    }
+
+    _logPollTrace(article, announcement) {
+        const buf = this.pollTrace || [];
+        const published = Number(announcement.releaseDate) || 0;
+        if (!(published > 0)) return;
+        const rows = buf.filter(r => r.t >= published - 2000);
+        const clock = ms => new Date(ms).toISOString().slice(11, 23);
+        const done = rows.filter(r => !r.skip);
+        const sawIt = done.filter(r => r.ids.includes(article.id));
+        const lines = rows.slice(-40).map(r => r.skip
+            ? `${clock(r.t)} SKIP(${r.skip})`
+            : `${clock(r.t)}->${clock(r.end)} ${r.ip} ${r.os}/pp${r.pp} http=${r.status} cache=${r.cache} age=${r.age} n=${r.ids.length}${r.ids.includes(article.id) ? ' HAS' : ''}`);
+        console.log(`🔎 [UPBIT-TRACE] id=${article.id} ${String(announcement.title).slice(0, 40)} | published=${clock(published)} | polls=${done.length} skipped=${rows.length - done.length} ` +
+            `errors=${done.filter(r => r.status !== 200).length} | first_poll_with_it=${sawIt[0] ? clock(sawIt[0].t) : 'none-in-buffer'} | detect=${clock(announcement.detectedAt)}` +
+            '\n  ' + lines.join('\n  '));
     }
 
     _sortOldestFirst(articles) {

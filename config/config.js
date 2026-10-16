@@ -54,7 +54,21 @@ function buildUpbitProxies() {
     const basePort = parseInt(process.env.UPBIT_SSH_TUNNEL_BASE_PORT) || 1081;
 
     tunnels.forEach((_, i) => proxies.push(`socks5h://${tunnelHost}:${basePort + i}`));
-    return [...new Set(proxies)];
+
+    // One entry per egress endpoint: the rate limit is per IP, so the same host:port listed again
+    // (e.g. a provider re-export with other credentials) would only overspend that IP. First wins.
+    const seenEndpoints = new Set();
+    const unique = proxies.filter(proxy => {
+        const endpoint = proxy === 'direct' ? 'direct' : proxy.replace(/^[a-z0-9+.-]+:\/\//i, '').replace(/^.*@/, '').toLowerCase();
+        if (seenEndpoints.has(endpoint)) return false;
+        seenEndpoints.add(endpoint);
+        return true;
+    });
+    const maxProxies = parseInt(process.env.UPBIT_MAX_PROXIES) || 25;
+    if (unique.length > maxProxies) {
+        console.warn(`⚠️ [CONFIG] ${unique.length} Upbit egress IPs configured, using the first ${maxProxies} (UPBIT_MAX_PROXIES)`);
+    }
+    return unique.slice(0, maxProxies);
 }
 
 function buildBinanceFuturesConfig() {

@@ -50,6 +50,9 @@ function createClientOrExplain(url, index, options) {
     }
 }
 
+const DEAD_COOLDOWN_STEP_MS = 5000;
+const DEAD_COOLDOWN_MAX_MS = 60000;
+
 class ProxyPool {
     constructor(proxyUrls, { minIntervalMs, backoffMs, headers, timeout } = {}) {
         const urls = (proxyUrls && proxyUrls.length > 0) ? proxyUrls : ['direct'];
@@ -97,6 +100,7 @@ class ProxyPool {
 
     reportSuccess(entry, latencyMs) {
         entry.ok++;
+        entry.failStreak = 0;
         entry.lastStatus = 200;
         entry.lastLatencyMs = latencyMs;
         entry.lastSuccessAt = Date.now();
@@ -109,7 +113,12 @@ class ProxyPool {
         if (status === 429 || status === 418) {
             entry.rateLimited++;
             entry.cooldownUntil = Date.now() + this.backoffMs * (status === 418 ? 4 : 1);
+            return;
         }
+        // Dead / misbehaving proxy (timeout, connection refused, 407, 5xx...): bench it briefly so
+        // the next acquire() goes to another IP, longer on each consecutive failure.
+        entry.failStreak = (entry.failStreak || 0) + 1;
+        entry.cooldownUntil = Date.now() + Math.min(DEAD_COOLDOWN_MAX_MS, DEAD_COOLDOWN_STEP_MS * entry.failStreak);
     }
 
     allCoolingDown(now = Date.now()) {
