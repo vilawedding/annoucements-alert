@@ -283,9 +283,13 @@ class BinanceMonitor {
         const delistScope = category === 'DELISTING' ? this.delistScope(title) : null;
         // Perp notices name contracts (1000000BOBUSDT): the generic extractor would cut the multiplier.
         const tokens = delistScope === 'FUTURES' ? this.extractPerpTokens(title) : this.extractTokens(title);
+        // A cryptolisting.ws message has no article page to read, but names its tickers pre-parsed.
+        if (tokens.length === 0 && Array.isArray(article.tickers)) {
+            tokens.push(...article.tickers);
+        }
         let pendingDelistTokens = false;
 
-        if (category === 'DELISTING' && tokens.length === 0 && /(delist|removal)/i.test(title)) {
+        if (category === 'DELISTING' && tokens.length === 0 && code && /(delist|removal)/i.test(title)) {
             // Wait for the slow article page only for a delist the trader may short.
             if (this._needsDelistTokensForTrade(delistScope)) {
                 const detailedTokens = await this.parseDelistDetails(code, delistScope);

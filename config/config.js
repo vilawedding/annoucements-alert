@@ -163,7 +163,15 @@ module.exports = {
             cookie: process.env.BITHUMB_COOKIE || ''
         }
     },
-    
+
+    // cryptolisting.ws announcement socket: extra source for the enabled exchanges above, traded like
+    // their own feeds (first source wins). jp endpoint = Binance + Upbit + Bithumb.
+    cryptolisting: {
+        enabled: parseBooleanEnv(process.env.CRYPTOLISTING_ENABLED, false),
+        apiKey: process.env.CRYPTOLISTING_API_KEY || '',
+        wsUrl: process.env.CRYPTOLISTING_WS_URL || 'wss://jp.cryptolisting.ws'
+    },
+
     // Auto-Trading Configuration
     autoTrade: {
         // Never trade a signal published longer ago than this (seconds). Guards against old
@@ -288,6 +296,8 @@ module.exports = {
         // Persistent "already seen" notice keys (restart must not re-alert / re-trade old notices)
         seenUpbitFile: 'data/seen_upbit.json',
         seenBithumbFile: 'data/seen_bithumb.json',
+        // Notices already handled from any source (first source wins, see cross-source-dedup)
+        seenCrossSourceFile: 'data/seen_cross_source.json',
         binanceFile: 'data/sent_announcements_binance.json',
         upbitFile: 'data/sent_announcements_upbit.json',
         bithumbFile: 'data/sent_announcements_bithumb.json'
