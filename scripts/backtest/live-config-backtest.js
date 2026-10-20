@@ -35,6 +35,8 @@ const WICK = args.includes('--wick');
 const PREFETCH_CONCURRENCY = 3;
 // Maintenance margin rate, % of notional (Binance first bracket of small-cap perps is ~1-2.5%).
 const MMR_PCT = Number(argValue('--mmr', 1));
+// Cap on positions open at once (0 = none; the live trader only refuses a 2nd one on the same symbol).
+const MAX_OPEN = Number(argValue('--max-open', 0));
 const COST = bt.COST_PCT;
 const f = (x, d = 2) => (Number.isFinite(x) ? x.toFixed(d) : '-');
 
@@ -169,6 +171,8 @@ async function runOnce(events, seed, fundingCache, secondsCache) {
             }
         }
         if ((openUntil.get(r.symbol) || 0) > r.entryAt) { skipped.push({ ev, reason: `${r.symbol} already open` }); continue; }
+        const openNow = [...openUntil.values()].filter(until => until > r.entryAt).length;
+        if (MAX_OPEN > 0 && openNow >= MAX_OPEN) { skipped.push({ ev, reason: `max ${MAX_OPEN} open position(s)` }); continue; }
         const p = config.strategies[ROUTES[ev.strategy].profile];
         if (!fundingCache.has(r.symbol + ev.releaseMs)) fundingCache.set(r.symbol + ev.releaseMs, await fundingOf(r.symbol, ev.releaseMs));
         const s = (r.res === '1s' ? simulate1s : simulate)({ ...r, side: ev.side, funding: fundingCache.get(r.symbol + ev.releaseMs) }, p);
@@ -220,7 +224,7 @@ async function main() {
             (WICK ? 'SL/TP triggered by any trade in the second, filled at the level (pessimistic).'
                 : 'SL/TP triggered when a second closes past the level and filled at that close (mark-price proxy, gap slippage included).'), '');
     }
-    w(`Notices ${from} → ${to}. Config read from config/config.js + .env at ${new Date().toISOString().slice(0, 16)}Z. Net of ${COST}% cost and funding. One position per symbol at a time.`, '');
+    w(`Notices ${from} → ${to}. Config read from config/config.js + .env at ${new Date().toISOString().slice(0, 16)}Z. Net of ${COST}% cost and funding. One position per symbol at a time${MAX_OPEN > 0 ? `, at most ${MAX_OPEN} open overall` : ''}.`, '');
     w('| Profile | Size | SL / TP / hold | Trailing (price %) |', '|---|---|---|---|');
     for (const p of profiles) {
         const trailText = p.trail?.activatePct > 0 ? `activate ${p.trail.activatePct}% step ${p.trail.stepPct || p.trail.activatePct}% giveback ${p.trail.givebackPct || '-'}%` : 'off';

@@ -23,6 +23,8 @@ class LightningAutoTrader {
         this.config = config.autoTrade;
         this.binance = trading.binance;
         this.telegramQueue = [];
+        // Symbols with an entry order on its way (not yet in the position manager)
+        this.entriesInFlight = new Set();
         this.isSendingTelegram = false;
         this.fastModeSkipTradableCheck = process.env.AUTO_TRADE_FAST_SKIP_TRADABLE_CHECK !== 'false';
         this.marketFirstAsyncProtection = process.env.AUTO_TRADE_MARKET_FIRST_ASYNC_PROTECTION !== 'false';
@@ -334,6 +336,30 @@ class LightningAutoTrader {
             : this.extractTokensFast(announcement.title || '');
         if (tokens.length === 0) return null;
 
+        // One position per symbol: a token whose symbol already has an open position (or an entry on
+        // its way) is skipped, other symbols trade as usual. Checked and claimed synchronously, so two
+        // signals for the same symbol (e.g. Upbit warning then delisting) cannot both pass.
+        const busy = tokens.filter(token => this._symbolBusy(`${token}USDT`));
+        if (busy.length > 0) {
+            console.log(`⏭️ [TRADE] skip ${busy.map(t => `${t}USDT`).join(',')}: position already open — ${exchange} ${category} ${announcement.title}`);
+        }
+        const free = [...new Set(tokens.filter(token => !busy.includes(token)))];
+        if (free.length === 0) return null;
+
+        const symbols = free.map(token => `${token}USDT`);
+        symbols.forEach(symbol => this.entriesInFlight.add(symbol));
+        try {
+            return await this._executeEntries(announcement, exchange, category, free);
+        } finally {
+            symbols.forEach(symbol => this.entriesInFlight.delete(symbol));
+        }
+    }
+
+    _symbolBusy(symbol) {
+        return this.entriesInFlight.has(symbol) || Boolean(this.positionManager?.positions?.has(symbol));
+    }
+
+    async _executeEntries(announcement, exchange, category, tokens) {
         const takeProfitPercent = exchange === 'BINANCE'
             ? this.config.takeProfitPercentBinance
             : exchange === 'BITHUMB'
@@ -508,7 +534,7 @@ class LightningAutoTrader {
                 this.queueTelegramMessage(errorMessage);
             }
         }));
-        
+
         const totalDuration = Date.now() - executionStartTime;
         perfOptimizer.recordMetric('tradingExecution', totalDuration);
         
