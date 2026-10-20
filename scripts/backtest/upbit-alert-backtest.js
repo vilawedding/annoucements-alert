@@ -209,6 +209,47 @@ async function trades(symbol, from, to) {
     });
 }
 
+/**
+ * 1s candles [t, o, h, l, c] of a perp built from its aggTrades dumps (last-trade price; seconds
+ * without trades are absent), from <= t <= to. null when no dump exists. Futures have no 1s klines.
+ */
+async function secondCandles(symbol, from, to) {
+    return cachedJson(`vision-1s:${symbol}:${from}:${to}`, async () => {
+        const out = [];
+        let anyFile = false;
+        let cur = null;
+        for (let day = Date.parse(utcDay(from)); day <= to; day += 86400000) {
+            const zip = await visionZip(`${VISION}/aggTrades/${symbol}/${symbol}-aggTrades-${utcDay(day)}.zip`);
+            if (!zip) continue;
+            anyFile = true;
+            try {
+                // agg_trade_id,price,quantity,first_trade_id,last_trade_id,transact_time,is_buyer_maker
+                await streamZipLines(zip, line => {
+                    const cols = line.split(',');
+                    const T = Number(cols[5]);
+                    if (!Number.isFinite(T)) return true; // header
+                    if (T > to) return false;
+                    if (T < from) return true;
+                    const p = Number(cols[1]);
+                    const s = T - (T % 1000);
+                    if (!cur || cur[0] !== s) {
+                        cur = [s, p, p, p, p];
+                        out.push(cur);
+                    } else {
+                        if (p > cur[2]) cur[2] = p;
+                        if (p < cur[3]) cur[3] = p;
+                        cur[4] = p;
+                    }
+                    return true;
+                });
+            } finally {
+                fs.rmSync(zip, { force: true });
+            }
+        }
+        return anyFile ? out : null;
+    });
+}
+
 /** Daily 1m klines of a (possibly removed) perp from the dump; [] when no file. */
 async function visionKlines(symbol, day) {
     return cachedJson(`vision-klines:${symbol}:${day}`, async () => {
@@ -520,7 +561,7 @@ if (require.main === module) {
 
 // Reused by the per-strategy studies (same data sources and cache).
 module.exports = {
-    buildPool, loadEvents, analyse, resolvePerp, klines, binanceGet, trades, sim, mean, median, pct, fmtTz,
+    buildPool, loadEvents, analyse, resolvePerp, klines, binanceGet, trades, secondCandles, sim, mean, median, pct, fmtTz,
     SPOT, MIN, CACHE_DIR, REPORT_DIR, INPUT, COST_PCT, EXCHANGE,
     poolSize: () => pool.size
 };

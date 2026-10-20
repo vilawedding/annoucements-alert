@@ -17,6 +17,7 @@ const path = require('path');
 process.argv.push('--exchange', 'all'); // the backtest module reads its CLI args at load
 const bt = require('./upbit-alert-backtest');
 const config = require('../../config/config');
+const { trailingFromPricePct, getTrailLockRoiPct } = require('../../modules/trading/trade-engine');
 
 const { MIN, pct, mean, median, fmtTz } = bt;
 const args = process.argv.slice(2);
@@ -25,6 +26,15 @@ const LAG_MIN = Number(argValue('--lag-min', 10));
 const LAG_MAX = Number(argValue('--lag-max', 20));
 const RUNS = Number(argValue('--runs', 30));
 const SEED = Number(argValue('--seed', 1));
+// 1s = whole holding period on 1s perp candles built from aggTrades (falls back to 1m when no dump).
+const RES = argValue('--res', '1m');
+// Live SL/TP trigger on MARK_PRICE (no 1s history exists). Default 1s mode: trigger on the second's
+// close and fill there (mark-price proxy, includes gap slippage). --wick: any trade in the second
+// triggers, filled at the level (pessimistic bound).
+const WICK = args.includes('--wick');
+const PREFETCH_CONCURRENCY = 3;
+// Maintenance margin rate, % of notional (Binance first bracket of small-cap perps is ~1-2.5%).
+const MMR_PCT = Number(argValue('--mmr', 1));
 const COST = bt.COST_PCT;
 const f = (x, d = 2) => (Number.isFinite(x) ? x.toFixed(d) : '-');
 
@@ -70,19 +80,98 @@ function simulate(t, p) {
     return { netPct, usdt: p.amount * netPct / 100, exitAt, exit, fundingPct: -dir * funding };
 }
 
-async function runOnce(events, seed, fundingCache) {
+/** Same as simulate() on a flat Float64Array of 1s candles [t, o, h, l, c]*n, from index t.secIdx. */
+function simulate1s(t, p) {
+    const dir = t.side === 'LONG' ? 1 : -1;
+    const c = t.sec;
+    const end = t.entryAt + p.maxHoldMin * MIN;
+    // Isolated margin: liquidated (whole margin lost) once the move reaches 1/leverage minus the maintenance margin.
+    const marginPct = 100 / p.leverage;
+    const liqPct = marginPct - MMR_PCT;
+    // Stop level in price % of the trade's direction (negative = loss); trailing raises it.
+    const initialStop = p.slPct > 0 ? -p.slPct : -Infinity;
+    let stop = initialStop;
+    // Same ladder as the position manager (trade-engine), one level per mark tick (~1s) on the close.
+    const trail = trailingFromPricePct(p.trail, p.leverage);
+    let trailLevel = 0;
+    let pnl = null, exitAt = null, exit = 'time', last = t.secIdx;
+    for (let i = t.secIdx; i * 5 < c.length && c[i * 5] < end; i++) {
+        last = i;
+        const o = i * 5;
+        const r = dir * pct(t.entry, c[o + 4]);
+        const stopExit = stop > initialStop ? 'TRAIL' : 'SL';
+        if (WICK) {
+            const worst = dir * pct(t.entry, dir === 1 ? c[o + 3] : c[o + 2]);
+            const best = dir * pct(t.entry, dir === 1 ? c[o + 2] : c[o + 3]);
+            if (worst <= -liqPct && !(stop > -liqPct)) { pnl = -marginPct; exit = 'LIQ'; }
+            else if (worst <= stop) { pnl = stop; exit = stopExit; }
+            else if (p.tpPct > 0 && best >= p.tpPct) { pnl = p.tpPct; exit = 'TP'; }
+        } else {
+            // A jump past the liquidation price within one second beats the stop-market order.
+            if (r <= -liqPct) { pnl = -marginPct; exit = 'LIQ'; }
+            else if (r <= stop) { pnl = r; exit = stopExit; }
+            else if (p.tpPct > 0 && r >= p.tpPct) { pnl = r; exit = 'TP'; }
+        }
+        if (pnl !== null) { exitAt = c[o] + 1000; break; }
+        if (trail && r * p.leverage >= trail.activateRoiPct + trailLevel * trail.stepRoiPct) {
+            trailLevel++;
+            const lockRoi = getTrailLockRoiPct(trailLevel, trail.lockBufferPct, trail.stepRoiPct,
+                trail.firstLockRoiPct, trail.activateRoiPct, trail.maxGivebackRoiPct);
+            stop = Math.max(stop, lockRoi / p.leverage);
+        }
+    }
+    if (pnl === null) { pnl = dir * pct(t.entry, c[last * 5 + 4]); exitAt = c[last * 5] + 1000; }
+    const funding = t.funding.filter(([time]) => time > t.entryAt && time <= exitAt).reduce((s, [, r]) => s + r, 0);
+    const netPct = pnl - dir * funding - COST;
+    return { netPct, usdt: p.amount * netPct / 100, exitAt, exit, fundingPct: -dir * funding };
+}
+
+const eventKey = ev => `${ev.strategy}:${ev.token}:${ev.releaseMs}`;
+
+/** Downloads/caches the 1s candles of every signal once (the lag only moves the entry inside them). */
+async function prefetchSeconds(events) {
+    if (LAG_MAX > 240) throw new Error('--res 1s fetches 5 minutes past the hold: keep --lag-max <= 240');
+    const out = new Map();
+    let next = 0, done = 0;
+    const worker = async () => {
+        while (next < events.length) {
+            const ev = events[next++];
+            const r = await bt.analyse(ev, LAG_MAX * 1000);
+            if (!r.skip) {
+                const p = config.strategies[ROUTES[ev.strategy].profile];
+                const c = await bt.secondCandles(r.symbol, ev.releaseMs - 30000, ev.releaseMs + (p.maxHoldMin + 5) * MIN);
+                if (c && c.length) out.set(eventKey(ev), Float64Array.from(c.flat()));
+            }
+            if (++done % 10 === 0) console.log(`  1s candles ${done}/${events.length}`);
+        }
+    };
+    await Promise.all(Array.from({ length: PREFETCH_CONCURRENCY }, worker));
+    return out;
+}
+
+async function runOnce(events, seed, fundingCache, secondsCache) {
     const random = rng(seed);
     const trades = [];
     const skipped = [];
     const openUntil = new Map(); // symbol -> exit time of the open position
     for (const ev of events) {
         const lagMs = Math.round((LAG_MIN + random() * (LAG_MAX - LAG_MIN)) * 1000);
-        const r = await bt.analyse(ev, lagMs);
+        let r = await bt.analyse(ev, lagMs);
         if (r.skip) { skipped.push({ ev, reason: r.skip }); continue; }
+        const sec = secondsCache && secondsCache.get(eventKey(ev));
+        if (sec) {
+            // Market order at release + lag: filled at the first perp trade from then on.
+            const entryTs = ev.releaseMs + lagMs;
+            let idx = 0;
+            while (idx * 5 < sec.length && sec[idx * 5] < entryTs) idx++;
+            if (idx * 5 < sec.length && sec[idx * 5] - entryTs < 10000) {
+                r = { ...r, sec, secIdx: idx, entryAt: sec[idx * 5], entry: sec[idx * 5 + 1], res: '1s' };
+            }
+        }
         if ((openUntil.get(r.symbol) || 0) > r.entryAt) { skipped.push({ ev, reason: `${r.symbol} already open` }); continue; }
         const p = config.strategies[ROUTES[ev.strategy].profile];
         if (!fundingCache.has(r.symbol + ev.releaseMs)) fundingCache.set(r.symbol + ev.releaseMs, await fundingOf(r.symbol, ev.releaseMs));
-        const s = simulate({ ...r, side: ev.side, funding: fundingCache.get(r.symbol + ev.releaseMs) }, p);
+        const s = (r.res === '1s' ? simulate1s : simulate)({ ...r, side: ev.side, funding: fundingCache.get(r.symbol + ev.releaseMs) }, p);
         openUntil.set(r.symbol, s.exitAt);
         trades.push({ ev, r, p, lagMs, ...s });
     }
@@ -113,19 +202,30 @@ async function main() {
     console.log(`${events.length} signals ${from} → ${to}, lag random ${LAG_MIN}-${LAG_MAX}s, ${RUNS} runs`);
 
     const fundingCache = new Map();
+    const secondsCache = RES === '1s' ? await prefetchSeconds(events) : null;
     const runs = [];
     for (let i = 0; i < RUNS; i++) {
-        runs.push(await runOnce(events, SEED + i, fundingCache));
+        runs.push(await runOnce(events, SEED + i, fundingCache, secondsCache));
         if ((i + 1) % 5 === 0) console.log(`  run ${i + 1}/${RUNS}`);
     }
     const main = runs[0];
 
     const L = [];
     const w = (...s) => L.push(...s);
-    w(`# Live config backtest — lag random ${LAG_MIN}–${LAG_MAX}s per trade`, '');
+    const resLabel = RES === '1s' ? (WICK ? '1s candles, wick trigger' : '1s candles, close trigger') : '1m candles';
+    w(`# Live config backtest — lag random ${LAG_MIN}–${LAG_MAX}s per trade, ${resLabel}`, '');
+    if (RES === '1s') {
+        const on1s = main.trades.filter(t => t.r.res === '1s').length;
+        w(`Price path: 1s perp candles from aggTrades for ${on1s}/${main.trades.length} trades (others 1m). ` +
+            (WICK ? 'SL/TP triggered by any trade in the second, filled at the level (pessimistic).'
+                : 'SL/TP triggered when a second closes past the level and filled at that close (mark-price proxy, gap slippage included).'), '');
+    }
     w(`Notices ${from} → ${to}. Config read from config/config.js + .env at ${new Date().toISOString().slice(0, 16)}Z. Net of ${COST}% cost and funding. One position per symbol at a time.`, '');
-    w('| Profile | Size | SL / TP / hold |', '|---|---|---|');
-    for (const p of profiles) w(`| ${p.name} | ${p.amount}u notional × ${p.leverage}x (margin ${f(p.amount / p.leverage, 1)}u) | ${p.slPct}% / ${p.tpPct || '-'}% / ${p.maxHoldMin}m |`);
+    w('| Profile | Size | SL / TP / hold | Trailing (price %) |', '|---|---|---|---|');
+    for (const p of profiles) {
+        const trailText = p.trail?.activatePct > 0 ? `activate ${p.trail.activatePct}% step ${p.trail.stepPct || p.trail.activatePct}% giveback ${p.trail.givebackPct || '-'}%` : 'off';
+        w(`| ${p.name} | ${p.amount}u notional × ${p.leverage}x (margin ${f(p.amount / p.leverage, 1)}u) | ${p.slPct}% / ${p.tpPct || '-'}% / ${p.maxHoldMin}m | ${trailText} |`);
+    }
 
     w('', `## Distribution over ${RUNS} random-lag runs (seeds ${SEED}–${SEED + RUNS - 1})`, '');
     const dist = key => { const v = runs.map(r => r[key]); return `${f(mean(v))} (min ${f(Math.min(...v))}, median ${f(median(v))}, max ${f(Math.max(...v))})`; };
@@ -137,12 +237,12 @@ async function main() {
     w(`- Trades: ${f(mean(runs.map(r => r.trades.length)), 0)} per run; max open at once: ${peakOpen} (margin needed ≈ ${f(peakOpen * maxMargin, 0)}u)`);
 
     w('', `## Per strategy (mean over runs)`, '');
-    w('| Signal | trades / run | total USDT | avg / trade | win | worst trade | SL / TP / time exits |', '|---|---:|---:|---:|---:|---:|---|');
+    w('| Signal | trades / run | total USDT | avg / trade | win | worst trade | SL / TRAIL / TP / time / LIQ exits |', '|---|---:|---:|---:|---:|---:|---|');
     for (const name of Object.keys(ROUTES)) {
         const per = runs.map(r => r.trades.filter(t => t.ev.strategy === name));
         if (!per[0] || !per.some(x => x.length)) continue;
         const flat = per.flat();
-        const exits = ['SL', 'TP', 'time'].map(x => `${f(flat.filter(t => t.exit === x).length / flat.length * 100, 0)}%`).join(' / ');
+        const exits = ['SL', 'TRAIL', 'TP', 'time', 'LIQ'].map(x => `${f(flat.filter(t => t.exit === x).length / flat.length * 100, 0)}%`).join(' / ');
         w(`| ${name} | ${f(mean(per.map(x => x.length)), 1)} | ${f(mean(per.map(x => x.reduce((s, t) => s + t.usdt, 0))))} | ${f(mean(flat.map(t => t.usdt)))} | ${f(flat.filter(t => t.usdt > 0).length / flat.length * 100, 0)}% | ${f(Math.min(...flat.map(t => t.usdt)))} | ${exits} |`);
     }
 
@@ -178,7 +278,8 @@ async function main() {
     w('', `## Skipped signals (seed ${SEED})`, '', '| Published (GMT+7) | Signal | Token | Reason |', '|---|---|---|---|');
     for (const s of main.skipped) w(`| ${fmtTz(s.ev.releaseMs, 7)} | ${s.ev.strategy} | ${s.ev.token} | ${s.reason} |`);
 
-    const file = path.join(bt.REPORT_DIR, `live-config-backtest-${from}_${to}-lag${LAG_MIN}-${LAG_MAX}s.md`);
+    const resSuffix = RES === '1s' ? (WICK ? '-1s-wick' : '-1s') : '';
+    const file = path.join(bt.REPORT_DIR, `live-config-backtest-${from}_${to}-lag${LAG_MIN}-${LAG_MAX}s${resSuffix}.md`);
     fs.writeFileSync(file, L.join('\n') + '\n');
     console.log(L.slice(0, 32).join('\n'));
     console.log(`Output: ${file}`);
