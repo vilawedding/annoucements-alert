@@ -5,10 +5,13 @@ const storage = require('../storage');
 const perfOptimizer = require('./performance-optimizer');
 const fastCache = require('./fast-cache');
 const { createPositionManager } = require('../trading/position-manager');
+const { trailingFromPricePct } = require('../trading/trade-engine');
 
 const PRECISION_REFRESH_MS = 5 * 60 * 1000;
 const CONNECTION_KEEPALIVE_MS = 15000;
 const WARM_SOCKETS = 3;
+// 2 signed calls per symbol: ~10 req/s, far below the API limits, done in ~2 min for ~600 symbols.
+const MARGIN_PREP_SPACING_MS = 200;
 
 /**
  * Lightning-Fast Auto Trader
@@ -50,6 +53,7 @@ class LightningAutoTrader {
             try {
                 const precisions = await this.binance.loadTradableSymbolPrecisions();
                 precisions.forEach((precision, symbol) => fastCache.cacheSymbolPrecision(symbol, precision));
+                this.tradableSymbols = [...precisions.keys()];
                 return precisions.size;
             } catch (error) {
                 console.error(`[WARMUP] precision preload failed: ${error.message}`);
@@ -72,8 +76,15 @@ class LightningAutoTrader {
         const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
         console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
 
-        setInterval(refreshPrecisions, PRECISION_REFRESH_MS);
-        setInterval(refreshLeverageBrackets, PRECISION_REFRESH_MS);
+        // Background: never awaited, the monitors start right away. Symbols listed later are picked
+        // up on the next refresh.
+        this.prepareMargin().catch(error => console.error(`[MARGIN] prepare failed: ${error.message}`));
+
+        setInterval(async () => {
+            await refreshPrecisions();
+            await refreshLeverageBrackets();
+            this.prepareMargin().catch(error => console.error(`[MARGIN] prepare failed: ${error.message}`));
+        }, PRECISION_REFRESH_MS);
         // Concurrent pings keep several sockets warm (order + parallel tokens + leverage).
         const keepWarm = () => {
             for (let i = 0; i < WARM_SOCKETS; i++) {
@@ -82,6 +93,39 @@ class LightningAutoTrader {
         };
         keepWarm();
         setInterval(keepWarm, CONNECTION_KEEPALIVE_MS);
+    }
+
+    /**
+     * ISOLATED margin + leverage set ahead on every tradable symbol, so the order path does not wait
+     * on them and the loss of a trade is capped at its margin. Margin type cannot change once a
+     * position is open, so it must happen before the signal. Leverage = the highest strategy
+     * leverage, capped per symbol; the trade still sets its own profile's leverage after the order.
+     */
+    async prepareMargin() {
+        if (this.preparingMargin || !this.tradableSymbols) return;
+        this.preparingMargin = true;
+        const profiles = Object.values(config.strategies);
+        const leverage = Math.max(this.config.leverage, ...profiles.map(p => p.leverage));
+        const amount = Math.max(this.config.amount, ...profiles.map(p => p.amount));
+        let done = 0, failed = 0;
+        try {
+            for (const symbol of this.tradableSymbols) {
+                if (this.binance.isIsolatedCached(symbol)) continue;
+                try {
+                    await this.binance.ensureIsolated(symbol);
+                    const symbolLeverage = Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);
+                    await this.binance.changeInitialLeverage(symbol, symbolLeverage);
+                    done++;
+                } catch (error) {
+                    failed++;
+                    console.warn(`[MARGIN] ${symbol}: ${error.response?.data?.msg || error.message}`);
+                }
+                await new Promise(resolve => setTimeout(resolve, MARGIN_PREP_SPACING_MS));
+            }
+        } finally {
+            this.preparingMargin = false;
+        }
+        if (done || failed) console.log(`⚙️ [MARGIN] ISOLATED + leverage set on ${done} symbols (${failed} failed)`);
     }
 
     /**
@@ -185,11 +229,13 @@ class LightningAutoTrader {
             amount: p.amount > 0 ? p.amount : this.config.amount,
             slPct: p.slPct,
             tpPct: p.tpPct,
+            trail: p.trail,
             risk: {
                 name: key,
                 initialSlRoiPct: p.slPct * p.leverage,
                 tpRoiPct: p.tpPct > 0 ? p.tpPct * p.leverage : 0,
-                trailing: null,
+                // null = no trailing (default): hold to SL / TP / time stop
+                trailing: trailingFromPricePct(p.trail, p.leverage),
                 maxHoldMin: p.maxHoldMin
             }
         };
@@ -204,14 +250,18 @@ class LightningAutoTrader {
         const maxLeverage = this.binance.getMaxLeverageCached(symbol, profile.amount);
         if (!maxLeverage || profile.leverage <= maxLeverage) return profile;
 
-        console.log(`⚙️ [LEVERAGE] ${symbol} max ${maxLeverage}x < ${profile.name} ${profile.leverage}x — using ${maxLeverage}x`);
+        // Isolated margin = the max loss of the trade: keep it, so a lower leverage means a smaller notional.
+        const amount = profile.amount * maxLeverage / profile.leverage;
+        console.log(`⚙️ [LEVERAGE] ${symbol} max ${maxLeverage}x < ${profile.name} ${profile.leverage}x — using ${maxLeverage}x, notional ${amount}u (same margin)`);
         return {
             ...profile,
             leverage: maxLeverage,
+            amount,
             risk: profile.risk && {
                 ...profile.risk,
                 initialSlRoiPct: profile.slPct * maxLeverage,
-                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * maxLeverage : 0
+                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * maxLeverage : 0,
+                trailing: trailingFromPricePct(profile.trail, maxLeverage)
             }
         };
     }
@@ -338,6 +388,14 @@ class LightningAutoTrader {
                 }
                 
                 const side = isShort ? 'SELL' : 'BUY';
+
+                // Normally already done by prepareMargin(); awaited only for a symbol it has not reached
+                // (fresh start, new listing). A trade that cannot be isolated is not placed.
+                if (!this.binance.isIsolatedCached(symbol)) {
+                    await this.binance.ensureIsolated(symbol).catch(error => {
+                        throw new Error(`cannot set ISOLATED margin: ${error.response?.data?.msg || error.message}`);
+                    });
+                }
 
                 // Place order with TP/SL using fast retry
                 const tradeFn = this.positionManager

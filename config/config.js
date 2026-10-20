@@ -24,6 +24,18 @@ function numEnv(name, defaultValue) {
     return Number.isFinite(value) ? value : defaultValue;
 }
 
+/**
+ * Trailing SL of a strategy in PRICE % (converted to ROI with the trade's leverage):
+ * <PREFIX>_TRAIL_ACTIVATE_PCT (0 = off), _TRAIL_STEP_PCT (0 = activate), _TRAIL_GIVEBACK_PCT (0 = ladder only).
+ */
+function strategyTrail(prefix) {
+    return {
+        activatePct: numEnv(`${prefix}_TRAIL_ACTIVATE_PCT`, 0),
+        stepPct: numEnv(`${prefix}_TRAIL_STEP_PCT`, 0),
+        givebackPct: numEnv(`${prefix}_TRAIL_GIVEBACK_PCT`, 0)
+    };
+}
+
 function parseNumberList(value, defaultValue) {
     const items = String(value || '').split(',').map(v => v.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
     return items.length > 0 ? items : defaultValue;
@@ -247,7 +259,8 @@ module.exports = {
             amount: numEnv('UPBIT_WARNING_AMOUNT', 0),          // 0 = AUTO_TRADE_AMOUNT
             slPct: numEnv('UPBIT_WARNING_SL_PCT', 5),
             tpPct: numEnv('UPBIT_WARNING_TP_PCT', 0),
-            maxHoldMin: numEnv('UPBIT_WARNING_MAX_HOLD_MIN', 1440)
+            maxHoldMin: numEnv('UPBIT_WARNING_MAX_HOLD_MIN', 1440),
+            trail: strategyTrail('UPBIT_WARNING')
         },
         // LONG "Binance Will List X" (token already has a perp, n=39): the move keeps going for an
         // hour (price@1h +11% median) — hold with a plain SL, no TP / trailing.
@@ -256,7 +269,8 @@ module.exports = {
             amount: numEnv('BINANCE_LISTING_AMOUNT', 0),
             slPct: numEnv('BINANCE_LISTING_SL_PCT', 5),
             tpPct: numEnv('BINANCE_LISTING_TP_PCT', 0),
-            maxHoldMin: numEnv('BINANCE_LISTING_MAX_HOLD_MIN', 60)
+            maxHoldMin: numEnv('BINANCE_LISTING_MAX_HOLD_MIN', 60),
+            trail: strategyTrail('BINANCE_LISTING')
         },
         // SHORT "Binance Will Delist X, Y" (backtest 2026-10-14, n=78, 20s latency): hold 240m, wide SL —
         // SL 3-5% gets swept (win 26-33%), no SL has a 130% squeeze tail. Leverage kept low for that tail.
@@ -265,14 +279,16 @@ module.exports = {
             amount: numEnv('BINANCE_DELISTING_AMOUNT', 0),
             slPct: numEnv('BINANCE_DELISTING_SL_PCT', 10),
             tpPct: numEnv('BINANCE_DELISTING_TP_PCT', 0),
-            maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240)
+            maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240),
+            trail: strategyTrail('BINANCE_DELISTING')
         },
         upbitDelisting: {
             leverage: numEnv('UPBIT_DELISTING_LEVERAGE', 5),
             amount: numEnv('UPBIT_DELISTING_AMOUNT', 0),
             slPct: numEnv('UPBIT_DELISTING_SL_PCT', 5),
             tpPct: numEnv('UPBIT_DELISTING_TP_PCT', 0),
-            maxHoldMin: numEnv('UPBIT_DELISTING_MAX_HOLD_MIN', 240)
+            maxHoldMin: numEnv('UPBIT_DELISTING_MAX_HOLD_MIN', 240),
+            trail: strategyTrail('UPBIT_DELISTING')
         }
     },
 

@@ -25,6 +25,8 @@ let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
 const deliveryTimes = new Map();
 // symbol -> leverage brackets [{ initialLeverage, notionalFloor, notionalCap }] ascending by notional
 const leverageBrackets = new Map();
+// Symbols confirmed on ISOLATED margin in this process
+const isolatedSymbols = new Set();
 let isServerTimeSyncing = false;
 
 function syncServerTimeInBackground() {
@@ -278,6 +280,25 @@ const account = {
     
     async changeMarginType(symbol, marginType) {
         return await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType }, true);
+    },
+
+    /**
+     * Isolated margin caps a position's loss at its own margin (cross draws on the whole wallet).
+     * Binance refuses the change while the symbol has a position or open orders, so it is set ahead
+     * of the order. -4046 = "No need to change margin type" (already isolated).
+     */
+    async ensureIsolated(symbol) {
+        if (isolatedSymbols.has(symbol)) return;
+        try {
+            await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType: 'ISOLATED' }, true);
+        } catch (error) {
+            if (error.response?.data?.code !== -4046) throw error;
+        }
+        isolatedSymbols.add(symbol);
+    },
+
+    isIsolatedCached(symbol) {
+        return isolatedSymbols.has(symbol);
     },
 
     /** Fills of this account on a symbol since startTime (realizedPnl + commission per fill). */
@@ -907,6 +928,8 @@ module.exports = {
     changeInitialLeverage: account.changeInitialLeverage,
     loadLeverageBrackets: account.loadLeverageBrackets,
     getMaxLeverageCached: account.getMaxLeverageCached,
+    ensureIsolated: account.ensureIsolated,
+    isIsolatedCached: account.isIsolatedCached,
     getSymbolPrecision: utils.getSymbolPrecision,
     loadTradableSymbolPrecisions: marketData.loadTradableSymbolPrecisions.bind(marketData),
     testConnectivity: marketData.testConnectivity,

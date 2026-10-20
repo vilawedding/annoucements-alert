@@ -49,6 +49,21 @@ function getTrailSlPrice(
     return averageEntry * (1 + dir * lockRoiPct / (leverage * 100));
 }
 
+/**
+ * Strategy trailing given in PRICE % (config.strategies[x].trail) -> the position manager's ROI
+ * settings for this leverage (capped leverage changes the ROI, not the price levels). null = off.
+ */
+function trailingFromPricePct(trail, leverage) {
+    if (!trail || !(trail.activatePct > 0) || !(leverage > 0)) return null;
+    return {
+        activateRoiPct: trail.activatePct * leverage,
+        stepRoiPct: (trail.stepPct > 0 ? trail.stepPct : trail.activatePct) * leverage,
+        lockBufferPct: 0,
+        firstLockRoiPct: 0,
+        maxGivebackRoiPct: trail.givebackPct > 0 ? trail.givebackPct * leverage : 0
+    };
+}
+
 function calcCurrentRoiPct(side, averageEntry, markPrice, leverage) {
     if (averageEntry <= 0 || markPrice <= 0) return 0;
     const dir = side === 'BUY' ? 1 : -1;
@@ -61,5 +76,6 @@ module.exports = {
     calcTpPrice,
     getTrailLockRoiPct,
     getTrailSlPrice,
+    trailingFromPricePct,
     calcCurrentRoiPct
 };
