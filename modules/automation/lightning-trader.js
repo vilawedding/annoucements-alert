@@ -6,6 +6,11 @@ const perfOptimizer = require('./performance-optimizer');
 const fastCache = require('./fast-cache');
 const { createPositionManager } = require('../trading/position-manager');
 const { trailingFromPricePct } = require('../trading/trade-engine');
+const { BybitSpot } = require('../trading/bybit-spot');
+const { BybitSpotManager } = require('../trading/bybit-spot-manager');
+
+// Never bought on the Bybit spot route (no listing pump: ~0% in the backtest).
+const STABLECOINS = new Set(['USDT', 'USDC', 'USDE', 'USDS', 'USD1', 'RLUSD', 'PYUSD', 'FDUSD', 'TUSD', 'DAI', 'USDD', 'XAUT', 'PAXG', 'EURC']);
 
 const PRECISION_REFRESH_MS = 5 * 60 * 1000;
 const CONNECTION_KEEPALIVE_MS = 15000;
@@ -33,6 +38,16 @@ class LightningAutoTrader {
         // Market entry here, then protective orders / trailing / PnL in the position manager.
         // POSITION_MANAGER_ENABLED=false keeps the old one-shot market+TP/SL path.
         this.positionManager = config.positionManager.enabled ? createPositionManager() : null;
+        this.tradableSymbolSet = new Set();
+        const bybitClient = new BybitSpot();
+        this.bybitSpot = bybitClient.enabled
+            ? new BybitSpotManager({
+                client: bybitClient,
+                notify: (message, channel) => telegram.notify(message, channel),
+                settings: config.strategies.upbitListingBybitSpot,
+                storageFile: require('path').join(__dirname, '..', '..', config.storage.bybitSpotPositionsFile)
+            })
+            : null;
     }
     
     /**
@@ -48,6 +63,7 @@ class LightningAutoTrader {
         if (this.positionManager) {
             await this.positionManager.start().catch(error => console.error(`[WARMUP] position manager start failed: ${error.message}`));
         }
+        if (this.bybitSpot) this.bybitSpot.start();
 
         if (!this.config.enabled) return;
 
@@ -56,6 +72,7 @@ class LightningAutoTrader {
                 const precisions = await this.binance.loadTradableSymbolPrecisions();
                 precisions.forEach((precision, symbol) => fastCache.cacheSymbolPrecision(symbol, precision));
                 this.tradableSymbols = [...precisions.keys()];
+                if (this.tradableSymbols.length > 0) this.tradableSymbolSet = new Set(this.tradableSymbols);
                 return precisions.size;
             } catch (error) {
                 console.error(`[WARMUP] precision preload failed: ${error.message}`);
@@ -78,6 +95,18 @@ class LightningAutoTrader {
         const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
         console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
 
+        // Bybit spot pairs (route for Upbit KRW listings without a Binance perp)
+        const refreshBybitPairs = async () => {
+            if (!this.bybitSpot || !this.config.upbitListingBybitSpot) return;
+            try {
+                const n = await this.bybitSpot.client.loadInstruments();
+                console.log(`🟠 [WARMUP] Bybit ${this.bybitSpot.client.cfg.testnet ? 'TESTNET ' : ''}spot: ${n} USDT pairs`);
+            } catch (error) {
+                console.error(`[WARMUP] Bybit spot pairs failed: ${error.message}`);
+            }
+        };
+        refreshBybitPairs();
+
         // Background: never awaited, the monitors start right away. Symbols listed later are picked
         // up on the next refresh.
         this.prepareMargin().catch(error => console.error(`[MARGIN] prepare failed: ${error.message}`));
@@ -85,6 +114,7 @@ class LightningAutoTrader {
         setInterval(async () => {
             await refreshPrecisions();
             await refreshLeverageBrackets();
+            await refreshBybitPairs();
             this.prepareMargin().catch(error => console.error(`[MARGIN] prepare failed: ${error.message}`));
         }, PRECISION_REFRESH_MS);
         // Concurrent pings keep several sockets warm (order + parallel tokens + leverage).
@@ -276,22 +306,97 @@ class LightningAutoTrader {
         if (!this.config.enabled) return null;
         if (!announcement) return null;
 
+        // Upbit KRW listing tokens without a Binance perp go to Bybit SPOT; the rest stays on Binance.
+        const spot = this._bybitSpotListing(announcement);
+        const [spotResults, binanceResults] = await Promise.all([
+            spot ? spot.results : null,
+            this._executeBinance(spot ? spot.rest : announcement)
+        ]);
+        const all = [...(spotResults || []), ...(binanceResults || [])];
+        return all.length > 0 ? all : null;
+    }
+
+    _hasBinancePerp(token) {
+        return ['', '1000', '1000000'].some(prefix => this.tradableSymbolSet.has(`${prefix}${token}USDT`));
+    }
+
+    /**
+     * Bybit SPOT route for an Upbit listing: KRW market (BTC/USDT-only listings lost in the backtest),
+     * not a stablecoin, no Binance perp, a USDT pair on Bybit. Returns null when nothing is routed,
+     * else { results: Promise<result[]>, rest: announcement with the remaining tokens for Binance }.
+     */
+    _bybitSpotListing(announcement) {
+        if (!this.bybitSpot || !this.config.upbitListingBybitSpot) return null;
+        if (String(announcement.exchange).toUpperCase() !== 'UPBIT' || String(announcement.category).toUpperCase() !== 'LISTING') return null;
+        if (!/KRW/.test(announcement.title || '')) return null;
+        if (!this._isFresh(announcement, false)) return null; // the Binance path logs the skip
+        if (this.tradableSymbolSet.size === 0) {
+            console.log(`⏭️ [BYBIT-SPOT] skip: Binance symbols not loaded, cannot tell which tokens lack a perp — ${announcement.title}`);
+            return null;
+        }
+
+        const tokens = Array.isArray(announcement.tokens) ? announcement.tokens : [];
+        const routed = [];
+        for (const token of tokens) {
+            const symbol = `${token}USDT`;
+            if (STABLECOINS.has(token) || this._hasBinancePerp(token)) continue;
+            if (!this.bybitSpot.client.hasPair(symbol)) {
+                console.log(`⏭️ [BYBIT-SPOT] ${token}: no Binance perp and no Bybit spot pair`);
+                continue;
+            }
+            if (this.entriesInFlight.has(`BYBIT:${symbol}`) || this.bybitSpot.positions.has(symbol)) {
+                console.log(`⏭️ [BYBIT-SPOT] skip ${symbol}: position already open`);
+                continue;
+            }
+            routed.push(token);
+        }
+        if (routed.length === 0) return null;
+
+        const source = { exchange: 'UPBIT', category: 'LISTING', title: announcement.title || '', hash: announcement.hash || null };
+        const results = Promise.all(routed.map(async (token) => {
+            const symbol = `${token}USDT`;
+            const key = `BYBIT:${symbol}`;
+            this.entriesInFlight.add(key);
+            const startedAt = Date.now();
+            try {
+                return await this.bybitSpot.open({ symbol, token, source });
+            } catch (error) {
+                console.error(`[BYBIT-SPOT] ${symbol} buy failed in ${Date.now() - startedAt}ms: ${error.message}`);
+                this.queueTelegramMessage(telegram.createErrorMessage(token, `${symbol} (Bybit spot)`, error.message));
+                return { token, symbol, success: false, venue: 'BYBIT_SPOT', error: error.message, duration: Date.now() - startedAt };
+            } finally {
+                this.entriesInFlight.delete(key);
+            }
+        }));
+        return { results, rest: { ...announcement, tokens: tokens.filter(t => !routed.includes(t)) } };
+    }
+
+    /**
+     * Freshness guard: trade only signals published moments ago. Without it, any notice the bot had
+     * not seen before (first run, restart, a proxy missing the baseline poll) was traded as if new —
+     * on 2026-10-13 a restart opened 6 demo positions on 1h–5 week old news.
+     */
+    _isFresh(announcement, log = true) {
         const exchange = String(announcement.exchange || '').toUpperCase();
         const category = String(announcement.category || '').toUpperCase();
-
-        // Freshness guard: trade only signals published moments ago. Without it, any notice the
-        // bot had not seen before (first run, restart, a proxy missing the baseline poll) was
-        // traded as if new — on 2026-10-13 a restart opened 6 demo positions on 1h–5 week old news.
         const publishedAt = Number(announcement.releaseDate);
         const ageMs = Date.now() - publishedAt;
         if (!(publishedAt > 0)) {
-            console.log(`⏭️ [TRADE] skip ${exchange} ${category}: no publication time — ${announcement.title}`);
-            return null;
+            if (log) console.log(`⏭️ [TRADE] skip ${exchange} ${category}: no publication time — ${announcement.title}`);
+            return false;
         }
         if (ageMs > this.config.maxSignalAgeSec * 1000) {
-            console.log(`⏭️ [TRADE] skip ${exchange} ${category}: published ${Math.round(ageMs / 1000)}s ago (> ${this.config.maxSignalAgeSec}s) — ${announcement.title}`);
-            return null;
+            if (log) console.log(`⏭️ [TRADE] skip ${exchange} ${category}: published ${Math.round(ageMs / 1000)}s ago (> ${this.config.maxSignalAgeSec}s) — ${announcement.title}`);
+            return false;
         }
+        return true;
+    }
+
+    async _executeBinance(announcement) {
+        const exchange = String(announcement.exchange || '').toUpperCase();
+        const category = String(announcement.category || '').toUpperCase();
+
+        if (!this._isFresh(announcement)) return null;
 
         if (exchange === 'UPBIT') {
             if (category === 'LISTING') {

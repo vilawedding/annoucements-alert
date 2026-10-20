@@ -178,6 +178,15 @@ module.exports = {
 
     // cryptolisting.ws announcement socket: extra source for the enabled exchanges above, traded like
     // their own feeds (first source wins). jp endpoint = Binance + Upbit + Bithumb.
+    // Bybit V5 (Unified Trading Account), SPOT only. BYBIT_TESTNET=true -> api-testnet.bybit.com.
+    bybit: {
+        apiKey: process.env.BYBIT_API_KEY || '',
+        apiSecret: process.env.BYBIT_API_SECRET || '',
+        testnet: parseBooleanEnv(process.env.BYBIT_TESTNET, true),
+        baseUrl: process.env.BYBIT_BASE_URL
+            || (parseBooleanEnv(process.env.BYBIT_TESTNET, true) ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com')
+    },
+
     cryptolisting: {
         enabled: parseBooleanEnv(process.env.CRYPTOLISTING_ENABLED, false),
         apiKey: process.env.CRYPTOLISTING_API_KEY || '',
@@ -195,6 +204,9 @@ module.exports = {
         // Only Upbit listings that open a KRW market (backtest: non-KRW listings pump ~10%
         // vs ~27% and are only profitable with a ≤1-2s entry)
         upbitKrwOnly: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_KRW_ONLY, false),
+        // Upbit KRW listing of a token WITHOUT a Binance perp: buy it on Bybit SPOT instead
+        // (backtest 2026-10-20, 26 listings 2023-2026). Independent of AUTO_TRADE_UPBIT_LISTING.
+        upbitListingBybitSpot: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_LISTING_BYBIT_SPOT, false),
         // SHORT on Upbit investment warning (거래 유의 종목 지정) / delisting (거래지원 종료).
         // Own risk profiles below (config.strategies).
         upbitWarning: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_WARNING, false),
@@ -282,6 +294,13 @@ module.exports = {
             maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240),
             trail: strategyTrail('BINANCE_DELISTING')
         },
+        // LONG on Bybit SPOT for Upbit KRW listings without a Binance perp (no leverage).
+        // Backtest 1s, lag 5s: hold 5-15m with SL 5% ~ +10% median per trade, 65% win.
+        upbitListingBybitSpot: {
+            amount: numEnv('BYBIT_SPOT_LISTING_AMOUNT', 100),     // USDT spent per listing
+            slPct: numEnv('BYBIT_SPOT_LISTING_SL_PCT', 5),
+            maxHoldMin: numEnv('BYBIT_SPOT_LISTING_MAX_HOLD_MIN', 15)
+        },
         upbitDelisting: {
             leverage: numEnv('UPBIT_DELISTING_LEVERAGE', 5),
             amount: numEnv('UPBIT_DELISTING_AMOUNT', 0),
@@ -309,6 +328,7 @@ module.exports = {
     // Storage Configuration
     storage: {
         positionsFile: 'data/positions.json',
+        bybitSpotPositionsFile: 'data/bybit_spot_positions.json',
         // Persistent "already seen" notice keys (restart must not re-alert / re-trade old notices)
         seenUpbitFile: 'data/seen_upbit.json',
         seenBithumbFile: 'data/seen_bithumb.json',
