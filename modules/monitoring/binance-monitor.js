@@ -8,6 +8,8 @@ const storage = require('../storage');
 const { MonitorHealth, describeHttpError } = require('./monitor-health');
 
 const LIST_URL = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query';
+const ARTICLE_DETAIL_URL = 'https://www.binance.com/bapi/composite/v1/public/cms/article/detail/query';
+const BLOCK_TAGS = new Set(['p', 'li', 'tr', 'td', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'br', 'ul', 'ol', 'table']);
 // Delist notices the trader may short (see delistScope).
 const TRADED_DELIST_SCOPES = new Set(['SPOT', 'FUTURES']);
 const CACHE_KEY_VARIANTS = 1000;
@@ -132,8 +134,53 @@ class BinanceMonitor {
         return Array.from(tokens);
     }
 
+    /**
+     * Article body from the CMS detail API. The article page itself now answers HTTP 202 with an empty
+     * body (bot challenge, seen 2026-10-21), so "Delist Multiple ... Perpetual Contracts" lost its tokens.
+     * The body is a JSON node tree: flattened to text, one line per block element.
+     */
+    async fetchArticleText(articleCode) {
+        const { data } = await httpClient.get(`${ARTICLE_DETAIL_URL}?articleCode=${articleCode}`, { timeout: 5000 });
+        return this.bodyToText(data?.data?.body);
+    }
+
+    /**
+     * Announcement body -> text. Binance sends either HTML / plain text, or (CMS detail API, possibly the
+     * WebSocket push too: its docs do not say) a JSON node tree {"node":"root","child":[...]}: flattened
+     * with one line per block element, which the futures parser needs (one settlement line per date).
+     */
+    bodyToText(raw) {
+        if (!raw) return '';
+        const str = typeof raw === 'string' ? raw : JSON.stringify(raw);
+        if (!/^\s*\{\s*"node"/.test(str)) return str;
+        let tree;
+        try {
+            tree = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch (_) {
+            return str;
+        }
+        const out = [];
+        const walk = (node) => {
+            if (!node) return;
+            if (node.node === 'text') out.push(node.text || '');
+            for (const child of node.child || []) walk(child);
+            if (BLOCK_TAGS.has(node.tag)) out.push('\n');
+        };
+        walk(tree);
+        return out.join('');
+    }
+
     async parseDelistDetails(articleCode, scope = 'SPOT') {
         try {
+            const text = await this.fetchArticleText(articleCode).catch(error => {
+                this.health.error('articleDetail', `${articleCode}: ${describeHttpError(error)}`);
+                return '';
+            });
+            if (text) {
+                const tokens = this.tokensFromContent(text, scope);
+                if (tokens.length > 0) return tokens;
+            }
+
             const url = `https://www.binance.com/en/support/announcement/${articleCode}`;
             
             const response = await httpClient.get(url, {
@@ -310,7 +357,7 @@ class BinanceMonitor {
         const tokens = delistScope === 'FUTURES' ? this.extractPerpTokens(title) : this.extractTokens(title);
         // The announcement WebSocket pushes the full body: read the tokens from it, no page fetch.
         if (tokens.length === 0 && article.body && category === 'DELISTING') {
-            tokens.push(...this.tokensFromContent(article.body, delistScope === 'FUTURES' ? 'FUTURES' : 'SPOT'));
+            tokens.push(...this.tokensFromContent(this.bodyToText(article.body), delistScope === 'FUTURES' ? 'FUTURES' : 'SPOT'));
         }
         // A cryptolisting.ws message has no article page to read, but names its tickers pre-parsed.
         if (tokens.length === 0 && Array.isArray(article.tickers)) {

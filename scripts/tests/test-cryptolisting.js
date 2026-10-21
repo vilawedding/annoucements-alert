@@ -110,6 +110,21 @@ async function test(name, fn) {
         assert.deepStrictEqual(a.tokens, ['1000000QQQ']);
     });
 
+    await test('Binance WS: body as a JSON node tree (CMS format) -> perp tokens from the settlement lines', async () => {
+        const line = text => ({ node: 'element', tag: 'p', child: [{ node: 'text', text }] });
+        const tree = { node: 'root', child: [
+            line('Binance Futures will close all positions and delist the following:'),
+            line('2026-10-05 09:00 (UTC): USDⓈ-M PROMPTUSDT, PUMPBTCUSDT and 1000000BOBUSDT Perpetual Contracts'),
+            line('Example: BTCUSDT Perpetual is not affected')
+        ] };
+        const a = await binanceWs.processWsMessage(push({
+            catalogId: 161, catalogName: 'Delisting', publishDate: Date.now(),
+            title: 'Binance Futures Will Delist Multiple USDⓈ-M Perpetual Contracts (2026-10-05)', body: JSON.stringify(tree)
+        }));
+        assert.strictEqual(a.delistScope, 'FUTURES');
+        assert.deepStrictEqual(a.tokens.sort(), ['1000000BOB', 'PROMPT', 'PUMPBTC']);
+    });
+
     await test('Binance WS: other catalogs, COMMAND replies and bStocks are ignored', async () => {
         assert.strictEqual(await binanceWs.processWsMessage(push({ catalogId: 49, title: 'Binance Launchpool XYZ', publishDate: Date.now() })), null);
         assert.strictEqual(await binanceWs.processWsMessage({ type: 'COMMAND', data: 'SUCCESS', subType: 'SUBSCRIBE' }), null);
