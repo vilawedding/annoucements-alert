@@ -214,6 +214,8 @@ module.exports = {
         // Own risk profiles below (config.strategies).
         upbitWarning: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_WARNING, false),
         upbitDelisting: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_DELISTING, false),
+        // SHORT Upbit listings that open BTC/USDT markets only (no KRW), delayed (config.strategies.upbitListingShort)
+        upbitListingShort: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_LISTING_SHORT, false),
         bithumbListing: process.env.AUTO_TRADE_BITHUMB_LISTING !== 'false',
         binanceListing: process.env.AUTO_TRADE_BINANCE_LISTING !== 'false',
         // "Binance Will Add New Trading Pairs" never moved the price (backtest n=32) — off by default
@@ -299,6 +301,17 @@ module.exports = {
         },
         // LONG on Bybit SPOT for Upbit KRW listings without a Binance perp (no leverage).
         // Backtest 1s, lag 5s: hold 5-15m with SL 5% ~ +10% median per trade, 65% win.
+        // SHORT Upbit BTC/USDT-only listings on the Binance perp, delaySec after the notice
+        // (backtest 2026-10-21, 1s + funding: 58 listings, hold 4h SL 5% x10 -> +160u, DD 19u, win 71%).
+        upbitListingShort: {
+            leverage: numEnv('UPBIT_LISTING_SHORT_LEVERAGE', 10),
+            amount: numEnv('UPBIT_LISTING_SHORT_AMOUNT', 100),
+            slPct: numEnv('UPBIT_LISTING_SHORT_SL_PCT', 5),
+            tpPct: numEnv('UPBIT_LISTING_SHORT_TP_PCT', 0),
+            maxHoldMin: numEnv('UPBIT_LISTING_SHORT_MAX_HOLD_MIN', 240),
+            delaySec: numEnv('UPBIT_LISTING_SHORT_DELAY_SEC', 60),
+            trail: strategyTrail('UPBIT_LISTING_SHORT')
+        },
         upbitListingBybitSpot: {
             amount: numEnv('BYBIT_SPOT_LISTING_AMOUNT', 100),     // USDT spent per listing
             slPct: numEnv('BYBIT_SPOT_LISTING_SL_PCT', 5),

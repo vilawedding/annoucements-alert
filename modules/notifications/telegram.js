@@ -117,7 +117,8 @@ class TelegramService {
      */
     createTradeMessage(tradeResult, announcement = {}) {
         const { token, symbol, orderId, executedQty, quantity, leverage, amount, entryPrice, stopLoss, takeProfit, duration } = tradeResult;
-        const side = announcement.category === 'DELISTING' ? 'SHORT' : 'LONG';
+        // The trader reports the real side (WARNING / delayed listing SHORT are not DELISTING).
+        const side = tradeResult.side || (announcement.category === 'DELISTING' ? 'SHORT' : 'LONG');
         const totalMs = announcement.detectedAt ? Date.now() - announcement.detectedAt : null;
         const mode = config.binanceFutures.mode;
 
