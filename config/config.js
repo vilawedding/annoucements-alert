@@ -118,7 +118,12 @@ function buildBinanceFuturesConfig() {
         useTestnet,
         useDemo,
         testnetUrl: baseUrl,
-        productionUrl: 'https://fapi.binance.com',
+        productionUrl: 'https://fapi.binance.com',
+        // Order placement over the WebSocket API (kept-open connection, REST is the fallback). Demo has no
+        // ws-fapi host of its own: the futures testnet one takes the demo keys (same simulated account).
+        wsApiUrl: process.env.BINANCE_WS_API_URL
+            || (useTestnet ? 'wss://testnet.binancefuture.com/ws-fapi/v1' : 'wss://ws-fapi.binance.com/ws-fapi/v1'),
+        wsOrderEnabled: parseBooleanEnv(process.env.BINANCE_WS_ORDER_ENABLED, true),
         priceStreamUrl: process.env.BINANCE_FUTURES_PRICE_STREAM_URL || `${streamBase}/!miniTicker@arr`,
         markPriceStreamUrl: process.env.BINANCE_FUTURES_MARK_PRICE_STREAM_URL || `${streamBase}/!markPrice@arr@1s`
     };

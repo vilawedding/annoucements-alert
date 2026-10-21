@@ -97,6 +97,7 @@ class LightningAutoTrader {
         };
 
         this.binance.priceStream.start();
+        this.binance.wsOrder.start();
 
         const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
         console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);

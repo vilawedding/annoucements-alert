@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const https = require('https');
 const config = require('../../config/config');
 const priceStream = require('./price-stream');
+const WsOrderClient = require('./ws-order-client');
 
 // Max age of a streamed price that may be used to size an order instead of a REST call.
 const STREAM_PRICE_MAX_AGE_MS = parseInt(process.env.AUTO_TRADE_STREAM_PRICE_MAX_AGE_MS || '2000', 10);
@@ -322,6 +323,47 @@ const account = {
     }
 };
 
+// WebSocket API order channel (see ws-order-client.js). Never used in demo mode (no such endpoint there).
+const wsOrder = new WsOrderClient({
+    url: config.binanceFutures.wsOrderEnabled ? config.binanceFutures.wsApiUrl : '',
+    apiKey: API_KEY,
+    apiSecret: API_SECRET,
+    timestamp: () => {
+        const sinceFetch = Date.now() - serverTimeCache.lastFetch;
+        return serverTimeCache.time && sinceFetch < 30000
+            ? serverTimeCache.time + sinceFetch
+            : Date.now() + (serverTimeCache.offsetMs || 0);
+    }
+});
+
+/**
+ * MARKET order over the WebSocket API. The client order id is fixed up front, so when the answer is
+ * lost (timeout / dropped connection) the REST retry cannot open a second position: a duplicate id
+ * means the first one went through, and that order is read back instead.
+ */
+async function placeMarketOrderOverWs(params) {
+    const clientId = params.newClientOrderId || `ws${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const wsParams = { ...params, newClientOrderId: clientId };
+    const startedAt = Date.now();
+    try {
+        const result = await wsOrder.placeOrder(wsParams);
+        console.log(`⚡ [WS-ORDER] ${params.symbol} ${params.side} ${Date.now() - startedAt}ms`);
+        return result;
+    } catch (error) {
+        if (error.fromWsApi) throw error; // Binance answered with a refusal: same as REST would
+        console.warn(`[WS-ORDER] ${params.symbol} no answer (${error.message}), retrying on REST`);
+        try {
+            return await makeRequest('POST', '/fapi/v1/order', wsParams, true);
+        } catch (restError) {
+            const code = restError.response?.data?.code;
+            if (code === -4116 || code === -2010) {
+                return await makeRequest('GET', '/fapi/v1/order', { symbol: params.symbol, origClientOrderId: clientId }, true);
+            }
+            throw restError;
+        }
+    }
+}
+
 // Trading APIs
 const trading = {
     async placeOrder(orderParams) {
@@ -366,6 +408,9 @@ const trading = {
         if (newOrderRespType !== undefined) params.newOrderRespType = newOrderRespType;
         if (workingType !== undefined) params.workingType = workingType;
         
+        if (type === 'MARKET' && wsOrder.isReady() && closePosition !== true) {
+            return await placeMarketOrderOverWs(params);
+        }
         return await makeRequest('POST', '/fapi/v1/order', params, true);
     },
     
@@ -949,5 +994,6 @@ module.exports = {
     getSymbolPrecision: utils.getSymbolPrecision,
     loadTradableSymbolPrecisions: marketData.loadTradableSymbolPrecisions.bind(marketData),
     testConnectivity: marketData.testConnectivity,
-    priceStream
+    priceStream,
+    wsOrder
 };
