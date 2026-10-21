@@ -27,6 +27,8 @@ const deliveryTimes = new Map();
 const leverageBrackets = new Map();
 // Symbols confirmed on ISOLATED margin in this process
 const isolatedSymbols = new Set();
+// Current leverage setting per symbol (symbolConfig snapshot + every successful change)
+const symbolLeverage = new Map();
 let isServerTimeSyncing = false;
 
 function syncServerTimeInBackground() {
@@ -244,7 +246,28 @@ const account = {
     },
     
     async changeInitialLeverage(symbol, leverage) {
-        return await makeRequest('POST', '/fapi/v1/leverage', { symbol, leverage }, true);
+        const result = await makeRequest('POST', '/fapi/v1/leverage', { symbol, leverage }, true);
+        symbolLeverage.set(symbol, Number(result?.leverage) || leverage);
+        return result;
+    },
+
+    /**
+     * One signed call for every symbol's margin type + leverage setting (GET /fapi/v1/symbolConfig),
+     * so the order path knows whether a change is needed without asking. Returns the number of symbols.
+     */
+    async loadSymbolConfig() {
+        const list = await makeRequest('GET', '/fapi/v1/symbolConfig', {}, true);
+        for (const c of list || []) {
+            if (Number(c.leverage) > 0) symbolLeverage.set(c.symbol, Number(c.leverage));
+            if (c.marginType === 'ISOLATED') isolatedSymbols.add(c.symbol);
+            else isolatedSymbols.delete(c.symbol);
+        }
+        return (list || []).length;
+    },
+
+    /** Leverage the symbol is set to (null = unknown). */
+    getLeverageCached(symbol) {
+        return symbolLeverage.has(symbol) ? symbolLeverage.get(symbol) : null;
     },
 
     /**
@@ -929,6 +952,8 @@ module.exports = {
     loadLeverageBrackets: account.loadLeverageBrackets,
     getMaxLeverageCached: account.getMaxLeverageCached,
     ensureIsolated: account.ensureIsolated,
+    loadSymbolConfig: account.loadSymbolConfig,
+    getLeverageCached: account.getLeverageCached,
     isIsolatedCached: account.isIsolatedCached,
     getSymbolPrecision: utils.getSymbolPrecision,
     loadTradableSymbolPrecisions: marketData.loadTradableSymbolPrecisions.bind(marketData),

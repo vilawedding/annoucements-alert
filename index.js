@@ -8,8 +8,10 @@ const telegram = require('./modules/notifications');
 const http = require('http');
 const path = require('path');
 const { CrossSourceDedup } = require('./modules/monitoring/cross-source-dedup');
+const { SourceLatencyLog } = require('./modules/monitoring/source-latency');
 
 const crossSourceDedup = new CrossSourceDedup(path.join(__dirname, config.storage.seenCrossSourceFile));
+const sourceLatency = new SourceLatencyLog(path.join(__dirname, config.storage.sourceLatencyFile));
 
 //npx kill-port 3003 && node --require ./preload.js index-new.js
 
@@ -165,6 +167,8 @@ function handleAnnouncement(a) {
     // Several sources deliver the same notice: only the first one is alerted and traded.
     const source = a._source || 'REST';
     const duplicate = crossSourceDedup.claim(a, source);
+    // After the claim (order first), recorded for every source, duplicates included.
+    setImmediate(() => sourceLatency.record(a, source, duplicate ? duplicate.source : null));
     if (duplicate) {
         console.log(`🔁 [${a.exchange}] ${source} duplicate, ${duplicate.source} was first by ${duplicate.agoMs}ms | ${a.title}`);
         return;
@@ -230,6 +234,7 @@ async function main() {
     startHeartbeatLogger();
     
     if (config.exchanges.binance.enabled) {
+        monitoring.binance.startWebSocket(handleAnnouncement);
         runMonitorLoop('BINANCE', monitoring.binance, config.exchanges.binance.interval);
     }
     

@@ -510,6 +510,12 @@ test('trader shorts Binance spot/futures delists only, never margin / unknown sc
     trader.binance.isIsolatedCached = () => true; // no margin-type call to Binance
     trader.fastModeSkipTradableCheck = true;
     const ordered = [];
+    // Leverage must be set BEFORE the order (MITOUSDT 2026-10-21 entered at a stale 50x). No network.
+    const leverageOf = new Map([['1000000BOBUSDT', 50]]);
+    real.getLev = trader.binance.getLeverageCached;
+    real.setLev = trader.binance.changeInitialLeverage;
+    trader.binance.getLeverageCached = symbol => (leverageOf.has(symbol) ? leverageOf.get(symbol) : null);
+    trader.binance.changeInitialLeverage = async (symbol, lev) => { ordered.push(['leverage', symbol, lev]); leverageOf.set(symbol, lev); return { leverage: lev }; };
     trader.binance.trading.marketEntry = async (symbol, side) => { ordered.push([symbol, side]); throw new Error('stop'); };
     try {
         const base = { exchange: 'BINANCE', category: 'DELISTING', releaseDate: Date.now() };
@@ -518,10 +524,16 @@ test('trader shorts Binance spot/futures delists only, never margin / unknown sc
         assert.deepStrictEqual(ordered, [], 'no order for margin / unknown delists');
 
         await trader.executeLight({ ...base, delistScope: 'FUTURES', title: 'Binance Futures Will Delist Multiple USDⓈ-M Perpetual Contracts', tokens: ['1000000BOB'] }).catch(() => {});
-        assert.deepStrictEqual(ordered, [['1000000BOBUSDT', 'SELL']], 'futures delist shorts the multiplier perp');
+        const lev = config.strategies.binanceDelisting.leverage;
+        assert.deepStrictEqual(ordered, [['leverage', '1000000BOBUSDT', lev], ['1000000BOBUSDT', 'SELL']], 'leverage set before the short of the multiplier perp');
+        ordered.length = 0;
+        await trader.executeLight({ ...base, delistScope: 'FUTURES', title: 'Binance Futures Will Delist USDⓈ-M 1000000BOBUSDT Perpetual Contract', tokens: ['1000000BOB'] }).catch(() => {});
+        assert.deepStrictEqual(ordered, [['1000000BOBUSDT', 'SELL']], 'no leverage call when it is already right');
     } finally {
         trader.binance.trading.marketEntry = real.entry;
         trader.binance.isIsolatedCached = real.isolated;
+        trader.binance.getLeverageCached = real.getLev;
+        trader.binance.changeInitialLeverage = real.setLev;
         trader.positionManager = real.pm;
         trader.fastModeSkipTradableCheck = real.skip;
         config.autoTrade.enabled = real.enabled;

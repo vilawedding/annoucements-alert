@@ -135,7 +135,13 @@ module.exports = {
             catalogNames: {
                 48: "📈 NEW LISTING",
                 161: "🗑️ DELISTING",
-            }
+            },
+            // Official announcement WebSocket (push, com_announcement_en). Needs a PRODUCTION Binance API key
+            // (read-only is enough; demo keys do not work on api.binance.com). REST polling keeps running.
+            wsEnabled: parseBooleanEnv(process.env.BINANCE_ANNOUNCE_WS_ENABLED, true),
+            wsUrl: process.env.BINANCE_ANNOUNCE_WS_URL || 'wss://api.binance.com/sapi/wss',
+            wsApiKey: process.env.BINANCE_ANNOUNCE_API_KEY || process.env.BINANCE_API_KEY || '',
+            wsApiSecret: process.env.BINANCE_ANNOUNCE_API_SECRET || process.env.BINANCE_API_SECRET || ''
         },
         upbit: {
             enabled: parseBooleanEnv(process.env.UPBIT_ENABLED, false),
@@ -362,6 +368,8 @@ module.exports = {
         seenBithumbFile: 'data/seen_bithumb.json',
         // Notices already handled from any source (first source wins, see cross-source-dedup)
         seenCrossSourceFile: 'data/seen_cross_source.json',
+        // Every delivery per source (first + duplicates): npm run report:latency
+        sourceLatencyFile: 'data/source_latency.jsonl',
         binanceFile: 'data/sent_announcements_binance.json',
         upbitFile: 'data/sent_announcements_upbit.json',
         bithumbFile: 'data/sent_announcements_bithumb.json'

@@ -18,7 +18,9 @@
     "test:cryptolisting": "node scripts/tests/test-cryptolisting.js",
     "check:cryptolisting": "node scripts/tests/check-cryptolisting.js",
     "test:bybit-spot": "node --require ./preload.js scripts/tests/test-bybit-spot.js",
-    "check:bybit-spot": "node scripts/tests/check-bybit-spot.js"
+    "check:bybit-spot": "node scripts/tests/check-bybit-spot.js",
+    "check:binance-ws": "node scripts/tests/check-binance-announce-ws.js",
+    "report:latency": "node scripts/report/source-latency-report.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

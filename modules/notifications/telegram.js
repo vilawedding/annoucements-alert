@@ -5,6 +5,36 @@ const config = require('../../config/config');
  * Telegram Notification Service
  */
 
+/** 0.0006799999999999999 -> 0.00068; null / '' / NaN -> '-' */
+function formatPrice(value) {
+    const n = Number(value);
+    if (value === null || value === undefined || value === '' || !Number.isFinite(n) || n === 0) return '-';
+    return String(Number(n.toPrecision(8)));
+}
+
+/** HH:MM:SS.mmm in GMT+7 */
+function clock(ms) {
+    return new Date(ms + 7 * 3600e3).toISOString().slice(11, 23);
+}
+
+/**
+ * Publish -> detection -> order sent -> fill (Binance's own timestamp), each with its offset from the
+ * publish time. Publish = the source's time (exchange publish time; cryptolisting: its detection time).
+ */
+function formatTimeline(result, a) {
+    const published = Number(a.releaseDate);
+    if (!(published > 0)) return '';
+    const rel = ms => (ms > 0 ? `${clock(ms)} (+${ms - published}ms)` : '-');
+    const lines = [
+        `Published: ${clock(published)}${a._source === 'CRYPTOLISTING' ? ' (cryptolisting detect)' : ''}`,
+        `Detected:  ${rel(Number(a.detectedAt))} via ${a._source || 'REST'}`,
+        `Order sent: ${rel(result.orderSentAt)}`,
+        `Filled@Binance: ${rel(result.exchangeFillAt)}`
+    ];
+    if (result.orderSentAt && result.exchangeFillAt) lines.push(`Sent→fill: ${result.exchangeFillAt - result.orderSentAt}ms (incl. clock offset)`);
+    return lines.join('\n');
+}
+
 function escapeHtml(text) {
     return String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -122,6 +152,7 @@ class TelegramService {
         const totalMs = announcement.detectedAt ? Date.now() - announcement.detectedAt : null;
         const mode = config.binanceFutures.mode;
 
+        const timeline = formatTimeline(tradeResult, announcement);
         return `🤖 <b>ORDER FILLED${mode !== 'PRODUCTION' ? ` [${mode}]` : ''}</b>\n` +
             `════════════════════════\n\n` +
             `<b>Signal:</b> ${escapeHtml(announcement.exchange || '')} ${escapeHtml(announcement.category || '')}\n` +
@@ -129,10 +160,11 @@ class TelegramService {
             `<b>🟡 Binance Futures</b>\n` +
             `Symbol: ${escapeHtml(symbol)} | ${side} | ${leverage}x\n` +
             `Qty: ${executedQty || quantity} (~${amount} USDT)\n` +
-            `Entry: ${entryPrice}\n` +
-            `SL: ${stopLoss} | TP: ${takeProfit}\n` +
+            `Entry: ${formatPrice(entryPrice)}\n` +
+            `SL: ${formatPrice(stopLoss)} | TP: ${formatPrice(takeProfit)}\n` +
             `Order ID: <code>${orderId}</code>\n` +
-            `Order: ${duration}ms${totalMs !== null ? ` | detect→now: ${totalMs}ms` : ''}\n\n` +
+            `Order: ${duration}ms${totalMs !== null ? ` | detect→now: ${totalMs}ms` : ''}\n` +
+            (timeline ? `\n<b>⏱ Timeline</b> (GMT+7)\n${timeline}\n` : '') + `\n` +
             `#AutoTrade #${escapeHtml(announcement.exchange || 'Signal')}`;
     }
     

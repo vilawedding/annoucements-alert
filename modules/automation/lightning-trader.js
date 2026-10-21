@@ -146,17 +146,27 @@ class LightningAutoTrader {
     async prepareMargin() {
         if (this.preparingMargin || !this.tradableSymbols) return;
         this.preparingMargin = true;
-        const profiles = Object.values(config.strategies);
+        // Futures profiles only: a spot profile (Bybit) has no leverage and made this NaN, so every
+        // preset leverage call failed and symbols kept e.g. 50x (MITOUSDT 2026-10-21).
+        const profiles = Object.values(config.strategies).filter(p => p.leverage > 0);
         const leverage = Math.max(this.config.leverage, ...profiles.map(p => p.leverage));
         const amount = Math.max(this.config.amount, ...profiles.map(p => p.amount));
+        if (!(leverage > 0)) {
+            console.error(`[MARGIN] invalid target leverage ${leverage}, nothing preset`);
+            this.preparingMargin = false;
+            return;
+        }
         let done = 0, failed = 0;
         try {
+            // Current settings of every symbol in one call: only the ones that differ get a request.
+            await this.binance.loadSymbolConfig().catch(error => console.warn(`[MARGIN] symbolConfig: ${error.response?.data?.msg || error.message}`));
             for (const symbol of this.tradableSymbols) {
-                if (this.binance.isIsolatedCached(symbol)) continue;
+                const symbolLeverage = Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);
+                const isolated = this.binance.isIsolatedCached(symbol);
+                if (isolated && this.binance.getLeverageCached(symbol) === symbolLeverage) continue;
                 try {
-                    await this.binance.ensureIsolated(symbol);
-                    const symbolLeverage = Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);
-                    await this.binance.changeInitialLeverage(symbol, symbolLeverage);
+                    if (!isolated) await this.binance.ensureIsolated(symbol);
+                    if (this.binance.getLeverageCached(symbol) !== symbolLeverage) await this.binance.changeInitialLeverage(symbol, symbolLeverage);
                     done++;
                 } catch (error) {
                     failed++;
@@ -343,6 +353,14 @@ class LightningAutoTrader {
         const delayMs = config.strategies.upbitListingShort.delaySec * 1000;
         const waitMs = Math.max(0, Number(announcement.releaseDate) + delayMs - Date.now());
         console.log(`⏳ [LISTING-SHORT] ${(announcement.tokens || []).join(',')}: short in ${Math.round(waitMs / 1000)}s — ${title}`);
+        // Use the wait: put the symbols on this strategy's leverage now, so the order does not wait on it.
+        const leverage = config.strategies.upbitListingShort.leverage;
+        for (const token of announcement.tokens || []) {
+            const symbol = `${token}USDT`;
+            if (this._symbolBusy(symbol) || this.binance.getLeverageCached(symbol) === leverage) continue;
+            this.binance.changeInitialLeverage(symbol, Math.min(leverage, this.binance.getMaxLeverageCached(symbol, leverage * 10) || leverage))
+                .catch(error => console.warn(`[LISTING-SHORT] ${symbol} leverage preset: ${error.response?.data?.msg || error.message}`));
+        }
         await new Promise(resolve => setTimeout(resolve, waitMs));
         return this._executeBinance({ ...announcement, category: 'LISTING_SHORT' }, { freshnessChecked: true });
     }
@@ -603,11 +621,19 @@ class LightningAutoTrader {
                 
                 const side = isShort ? 'SELL' : 'BUY';
 
-                // Normally already done by prepareMargin(); awaited only for a symbol it has not reached
-                // (fresh start, new listing). A trade that cannot be isolated is not placed.
+                // Normally already done by prepareMargin(); awaited only when the symbol is not ready
+                // (fresh start, new listing, another strategy's leverage). The leverage must be right
+                // BEFORE the order: set after it, an isolated position keeps the old one (MITOUSDT
+                // 2026-10-21 entered at the symbol's 50x = 4u margin instead of 20x / 10u).
+                // A trade that cannot be isolated at the profile's leverage is not placed.
                 if (!this.binance.isIsolatedCached(symbol)) {
                     await this.binance.ensureIsolated(symbol).catch(error => {
                         throw new Error(`cannot set ISOLATED margin: ${error.response?.data?.msg || error.message}`);
+                    });
+                }
+                if (this.binance.getLeverageCached(symbol) !== profile.leverage) {
+                    await this.binance.changeInitialLeverage(symbol, profile.leverage).catch(error => {
+                        throw new Error(`cannot set ${profile.leverage}x leverage: ${error.response?.data?.msg || error.message}`);
                     });
                 }
 
@@ -634,17 +660,8 @@ class LightningAutoTrader {
                         { asyncProtection: this.marketFirstAsyncProtection }
                     );
 
+                const orderSentAt = Date.now();
                 const orderPromise = this.sniperRetry(tradeFn);
-
-                // Set leverage only after the order request is on the wire: fired first, it took
-                // the warm keep-alive socket and pushed the order onto a fresh TLS handshake.
-                // (It never applied to this order anyway — both requests were already racing.)
-                // setImmediate: runs after the order's promise chain (all microtasks) has dispatched it.
-                setImmediate(() => {
-                    this.binance.changeInitialLeverage(symbol, profile.leverage).catch((error) => {
-                        console.warn(`[LEVERAGE] ${symbol} set failed: ${error.message}`);
-                    });
-                });
 
                 const order = await orderPromise;
                 const tradeDuration = Date.now() - tradeStartTime;
@@ -669,6 +686,9 @@ class LightningAutoTrader {
                     symbol,
                     success: true,
                     side: isShort ? 'SHORT' : 'LONG',
+                    // Timeline (ms): order request sent (local clock), fill time stamped by Binance
+                    orderSentAt,
+                    exchangeFillAt: Number(filled.updateTime || filled.transactTime) || null,
                     orderId: filled.orderId,
                     avgPrice: filled.avgPrice,
                     executedQty: filled.executedQty || order.quantity,

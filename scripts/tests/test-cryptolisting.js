@@ -86,6 +86,42 @@ async function test(name, fn) {
         assert.ok(await binance.processAnnouncement({ id: 2, code: 'y', title: 'Binance Will Add ABC (ABC) Trading Pairs', releaseDate: Date.now(), catalogId: 48, url: '' }, 'test-pairs'));
     });
 
+    // ---------- Binance official announcement WebSocket (com_announcement_en) ----------
+    const binanceWs = require('../../modules/monitoring/binance-monitor');
+    const push = d => ({ type: 'DATA', topic: 'com_announcement_en', data: JSON.stringify({ disclaimer: '', ...d }) });
+
+    await test('Binance WS: spot delist with tokens only in the body -> tokens read from the body, no page fetch', async () => {
+        const a = await binanceWs.processWsMessage(push({
+            catalogId: 161, catalogName: 'Delisting', publishDate: Date.now(),
+            title: 'Notice of Removal of Spot Trading Pairs - 2026-10-30',
+            body: '<p>Binance will remove and cease trading on the following spot trading pairs: FOO/USDT, BAR/BTC</p>'
+        }));
+        assert.strictEqual(a.category, 'DELISTING');
+        assert.ok(a.tokens.includes('FOO'), JSON.stringify(a.tokens));
+        assert.strictEqual(a._source, 'WS');
+    });
+
+    await test('Binance WS: futures delist keeps the multiplier perp, title tokens win', async () => {
+        const a = await binanceWs.processWsMessage(push({
+            catalogId: 161, catalogName: 'Delisting', publishDate: Date.now(),
+            title: 'Binance Futures Will Delist USDⓈ-M 1000000QQQUSDT Perpetual Contract', body: 'x'
+        }));
+        assert.strictEqual(a.delistScope, 'FUTURES');
+        assert.deepStrictEqual(a.tokens, ['1000000QQQ']);
+    });
+
+    await test('Binance WS: other catalogs, COMMAND replies and bStocks are ignored', async () => {
+        assert.strictEqual(await binanceWs.processWsMessage(push({ catalogId: 49, title: 'Binance Launchpool XYZ', publishDate: Date.now() })), null);
+        assert.strictEqual(await binanceWs.processWsMessage({ type: 'COMMAND', data: 'SUCCESS', subType: 'SUBSCRIBE' }), null);
+        assert.strictEqual(await binanceWs.processWsMessage(push({ catalogId: 48, publishDate: Date.now(), title: 'Binance Exchange Adds Vistra Corp (VSTB) bStocks Trading Pairs on Binance Spot/Convert' })), null);
+    });
+
+    await test('Binance WS: same push twice -> second is null (stored hash)', async () => {
+        const msg = push({ catalogId: 161, publishDate: 1790000000000, title: 'Binance Will Delist ZZZ on 2026-11-02', body: '' });
+        assert.ok(await binanceWs.processWsMessage(msg));
+        assert.strictEqual(await binanceWs.processWsMessage(msg), null);
+    });
+
     await test('Upbit delist -> DELISTING via Upbit categorize', async () => {
         const a = await cl.toAnnouncement(msg({
             title: '고트세우스 막시무스(GOAT) 거래지원 종료 안내', ticker: 'GOAT',

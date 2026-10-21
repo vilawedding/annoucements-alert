@@ -10,6 +10,8 @@ config.strategies.upbitListingShort.delaySec = 0.2;
 
 const trader = require('../../modules/automation/lightning-trader');
 trader.positionManager = { positions: new Map() };
+// Leverage already right: the delay-window preset makes no Binance call
+trader.binance.getLeverageCached = () => config.strategies.upbitListingShort.leverage;
 
 let failed = 0;
 async function test(name, fn) {

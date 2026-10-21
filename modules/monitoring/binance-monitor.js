@@ -2,6 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const cheerio = require('cheerio');
 const https = require('https');
+const WebSocket = require('ws');
 const config = require('../../config/config');
 const storage = require('../storage');
 const { MonitorHealth, describeHttpError } = require('./monitor-health');
@@ -10,6 +11,12 @@ const LIST_URL = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/l
 // Delist notices the trader may short (see delistScope).
 const TRADED_DELIST_SCOPES = new Set(['SPOT', 'FUTURES']);
 const CACHE_KEY_VARIANTS = 1000;
+const WS_TOPIC = 'com_announcement_en';
+const WS_PING_MS = 25000;           // server closes after 60s without a PING
+const WS_RECONNECT_MIN_MS = 1000;
+const WS_RECONNECT_MAX_MS = 30000;
+const WS_ROTATE_MS = 23 * 3600e3;   // a connection lives 24h at most: reconnect before
+const WS_AUTH_RETRY_MS = 5 * 60000;
 // Same wording as scripts/report/export-announcements.js (STOCKS)
 const TOKENIZED_STOCKS = /\bbstocks?\b|tokenized (securit|stock)|stock trading/i;
 
@@ -36,6 +43,8 @@ class BinanceMonitor {
         this.catalogNames = this.config.catalogNames;
         this.blacklist = new Set(['USDT', 'FDUSD', 'TUSD', 'USD', 'BTC', 'ETH', 'BNB']);
         this.health = new MonitorHealth('BINANCE');
+        this.wsHealth = new MonitorHealth('BINANCE-WS');
+        this.wsConnected = false;
     }
 
     articleHash(article) {
@@ -132,7 +141,6 @@ class BinanceMonitor {
             });
 
             const pageHtml = String(response.data || '');
-            const tokens = new Set();
             let content = '';
 
             const jsonMatch = pageHtml.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
@@ -156,7 +164,18 @@ class BinanceMonitor {
                 }
             }
 
+            return this.tokensFromContent(content, scope);
+        } catch (error) {
+            this.health.error('delistDetails', `${articleCode}: ${describeHttpError(error)}`);
+            return [];
+        }
+    }
+
+    /** Delisted tokens named in an announcement body (HTML or text): article page or WebSocket push. */
+    tokensFromContent(content, scope = 'SPOT') {
+        try {
             if (!content) return [];
+            const tokens = new Set();
 
             if (scope === 'FUTURES') {
                 // Only the dated settlement lines name the delisted contracts; the rest of the page
@@ -180,9 +199,8 @@ class BinanceMonitor {
             });
             
             return Array.from(tokens);
-            
         } catch (error) {
-            this.health.error('delistDetails', `${articleCode}: ${describeHttpError(error)}`);
+            this.health.error('delistDetails', `content: ${error.message}`);
             return [];
         }
     }
@@ -290,6 +308,10 @@ class BinanceMonitor {
         const delistScope = category === 'DELISTING' ? this.delistScope(title) : null;
         // Perp notices name contracts (1000000BOBUSDT): the generic extractor would cut the multiplier.
         const tokens = delistScope === 'FUTURES' ? this.extractPerpTokens(title) : this.extractTokens(title);
+        // The announcement WebSocket pushes the full body: read the tokens from it, no page fetch.
+        if (tokens.length === 0 && article.body && category === 'DELISTING') {
+            tokens.push(...this.tokensFromContent(article.body, delistScope === 'FUTURES' ? 'FUTURES' : 'SPOT'));
+        }
         // A cryptolisting.ws message has no article page to read, but names its tickers pre-parsed.
         if (tokens.length === 0 && Array.isArray(article.tickers)) {
             tokens.push(...article.tickers);
@@ -428,8 +450,127 @@ class BinanceMonitor {
         return { processed, sent, announcements: found, latestAnnouncement };
     }
 
+    // ==================== ANNOUNCEMENT WEBSOCKET ====================
+
+    _wsUrl() {
+        const query = `random=${crypto.randomBytes(16).toString('hex')}&topic=${WS_TOPIC}&recvWindow=30000&timestamp=${Date.now()}`;
+        const signature = crypto.createHmac('sha256', this.config.wsApiSecret).update(query).digest('hex');
+        return `${this.config.wsUrl}?${query}&signature=${signature}`;
+    }
+
+    /** Push message -> announcement (same processing as a REST article). null = not actionable / seen. */
+    async processWsMessage(msg) {
+        if (msg?.type !== 'DATA' || msg.topic !== WS_TOPIC) return null;
+        const d = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+        const catalogId = Number(d?.catalogId);
+        if (!this.catalogIds.includes(catalogId) || !d.title) return null;
+        const hash = crypto.createHash('md5').update(`BINANCE-WS-${catalogId}-${d.publishDate}-${d.title}`).digest('hex');
+        const announcement = await this.processAnnouncement({
+            id: null,
+            code: null,
+            title: d.title,
+            body: d.body || '',
+            releaseDate: Number(d.publishDate) || Date.now(),
+            catalogId,
+            exchange: 'BINANCE',
+            url: 'https://www.binance.com/en/support/announcement'
+        }, hash);
+        if (!announcement) return null;
+        announcement._source = 'WS';
+        storage.add(announcement.hash, announcement.metadata, 'BINANCE');
+        storage.saveBinance().catch(() => {});
+        return announcement;
+    }
+
+    /**
+     * Official announcement stream (wss://api.binance.com/sapi/wss, topic com_announcement_en).
+     * Returns false when disabled or the API key is missing. Reconnects with backoff and every 23h.
+     */
+    startWebSocket(onAnnouncement) {
+        if (!this.config.enabled || !this.config.wsEnabled) return false;
+        if (!this.config.wsApiKey || !this.config.wsApiSecret) {
+            console.log('ℹ️ [BINANCE-WS] BINANCE_ANNOUNCE_API_KEY / _SECRET (or BINANCE_API_KEY / _SECRET) not set, announcement stream disabled (REST polling only)');
+            return false;
+        }
+
+        let reconnectDelay = WS_RECONNECT_MIN_MS;
+        const connect = () => {
+            let pingTimer = null;
+            let rotateTimer = null;
+            let authFailed = false;
+            const ws = new WebSocket(this._wsUrl(), {
+                headers: { 'X-MBX-APIKEY': this.config.wsApiKey },
+                perMessageDeflate: false
+            });
+            this.ws = ws;
+
+            ws.on('unexpected-response', (req, res) => {
+                let body = '';
+                res.on('data', chunk => { body += chunk; });
+                res.on('end', () => {
+                    this.wsHealth.error(`handshake HTTP ${res.statusCode}`, body.slice(0, 300) || '(empty body)');
+                    if (res.statusCode === 401 || res.statusCode === 403) authFailed = true;
+                    ws.terminate();
+                });
+            });
+
+            ws.on('open', () => {
+                this.wsConnected = true;
+                reconnectDelay = WS_RECONNECT_MIN_MS;
+                pingTimer = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.ping(); }, WS_PING_MS);
+                rotateTimer = setTimeout(() => ws.close(1000, 'rotate'), WS_ROTATE_MS);
+                console.log(`🔌 [BINANCE-WS] Connected (${WS_TOPIC}), waiting for the key check`);
+            });
+
+            ws.on('message', (data) => {
+                let msg;
+                try {
+                    msg = JSON.parse(data.toString('utf8'));
+                } catch (error) {
+                    this.wsHealth.error('parse', error.message);
+                    return;
+                }
+                if (msg.type === 'COMMAND') {
+                    // A bad key is reported here ({"data":"Invalid Api-Key ID.","subType":"REGISTER"}),
+                    // then the server closes: retry slowly instead of hammering it.
+                    if (msg.data === 'SUCCESS') {
+                        this.wsHealth.success();
+                        console.log(`🔌 [BINANCE-WS] ${msg.subType || 'command'} OK, announcement stream live`);
+                    } else {
+                        if (msg.subType === 'REGISTER') authFailed = true;
+                        this.wsHealth.error(`command ${msg.subType || ''}`, String(msg.data));
+                    }
+                    return;
+                }
+                this.wsHealth.success();
+                this.processWsMessage(msg)
+                    .then(announcement => { if (announcement) onAnnouncement(announcement); })
+                    .catch(error => this.wsHealth.error('handler', error.message));
+            });
+
+            ws.on('error', (error) => this.wsHealth.error('socket', error.message));
+
+            ws.on('close', (code, reason) => {
+                this.wsConnected = false;
+                clearInterval(pingTimer);
+                clearTimeout(rotateTimer);
+                const why = String(reason || '');
+                const delay = why === 'rotate' ? 0 : authFailed ? WS_AUTH_RETRY_MS : reconnectDelay;
+                if (why !== 'rotate') this.wsHealth.error('close', `code=${code} reason=${why} reconnectIn=${delay}ms`);
+                setTimeout(connect, delay);
+                if (!authFailed && why !== 'rotate') reconnectDelay = Math.min(reconnectDelay * 2, WS_RECONNECT_MAX_MS);
+            });
+        };
+
+        connect();
+        return true;
+    }
+
     getHealth() {
-        return this.health.toJSON();
+        return {
+            ...this.health.toJSON(),
+            ws: this.config.wsEnabled ? { connected: this.wsConnected, ...this.wsHealth.toJSON() } : null
+        };
     }
 }
 
