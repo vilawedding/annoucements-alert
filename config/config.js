@@ -77,7 +77,21 @@ function buildUpbitProxies() {
     const basePort = parseInt(process.env.UPBIT_SSH_TUNNEL_BASE_PORT) || 1081;
 
     tunnels.forEach((_, i) => proxies.push(`socks5h://${tunnelHost}:${basePort + i}`));
-    return [...new Set(proxies)];
+
+    // One entry per egress endpoint: the rate limit is per IP, so the same host:port listed again
+    // (e.g. a provider re-export with other credentials) would only overspend that IP. First wins.
+    const seenEndpoints = new Set();
+    const unique = proxies.filter(proxy => {
+        const endpoint = proxy === 'direct' ? 'direct' : proxy.replace(/^[a-z0-9+.-]+:\/\//i, '').replace(/^.*@/, '').toLowerCase();
+        if (seenEndpoints.has(endpoint)) return false;
+        seenEndpoints.add(endpoint);
+        return true;
+    });
+    const maxProxies = parseInt(process.env.UPBIT_MAX_PROXIES) || 25;
+    if (unique.length > maxProxies) {
+        console.warn(`⚠️ [CONFIG] ${unique.length} Upbit egress IPs configured, using the first ${maxProxies} (UPBIT_MAX_PROXIES)`);
+    }
+    return unique.slice(0, maxProxies);
 }
 
 function buildBinanceFuturesConfig() {
@@ -105,6 +119,11 @@ function buildBinanceFuturesConfig() {
         useDemo,
         testnetUrl: baseUrl,
         productionUrl: 'https://fapi.binance.com',
+        // Order placement over the WebSocket API (kept-open connection, REST is the fallback). Demo has no
+        // ws-fapi host of its own: the futures testnet one takes the demo keys (same simulated account).
+        wsApiUrl: process.env.BINANCE_WS_API_URL
+            || (useTestnet ? 'wss://testnet.binancefuture.com/ws-fapi/v1' : 'wss://ws-fapi.binance.com/ws-fapi/v1'),
+        wsOrderEnabled: parseBooleanEnv(process.env.BINANCE_WS_ORDER_ENABLED, true),
         priceStreamUrl: process.env.BINANCE_FUTURES_PRICE_STREAM_URL || `${streamBase}/!miniTicker@arr`,
         markPriceStreamUrl: process.env.BINANCE_FUTURES_MARK_PRICE_STREAM_URL || `${streamBase}/!markPrice@arr@1s`
     };
@@ -241,6 +260,11 @@ module.exports = {
         // Listing LONG default profile: notional = AUTO_TRADE_MARGIN x AUTO_TRADE_LEVERAGE
         amount: numEnv('AUTO_TRADE_MARGIN', 1) * (parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5),
         leverage: parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5,
+        // Upper bound on any order's leverage (0 = none). Keeps SL inside the liquidation distance.
+        leverageCap: numEnv('AUTO_TRADE_LEVERAGE_CAP', 20),
+        // true = every order uses the symbol's own max leverage (all profiles); false = configured
+        // leverage, only capped down when the symbol allows less
+        useSymbolMaxLeverage: parseBooleanEnv(process.env.AUTO_TRADE_LEVERAGE_MAX, false),
         stopLossPercent: parseFloat(process.env.AUTO_TRADE_SL_PERCENT) || 1.0,
         takeProfitPercent: parseFloat(process.env.AUTO_TRADE_TP_PERCENT) || 200.0,
         takeProfitPercentUpbit:

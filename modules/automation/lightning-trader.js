@@ -97,6 +97,7 @@ class LightningAutoTrader {
         };
 
         this.binance.priceStream.start();
+        this.binance.wsOrder.start();
 
         const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
         console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
@@ -161,7 +162,11 @@ class LightningAutoTrader {
             // Current settings of every symbol in one call: only the ones that differ get a request.
             await this.binance.loadSymbolConfig().catch(error => console.warn(`[MARGIN] symbolConfig: ${error.response?.data?.msg || error.message}`));
             for (const symbol of this.tradableSymbols) {
-                const symbolLeverage = Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);
+                // AUTO_TRADE_LEVERAGE_MAX: the symbol's own max (under AUTO_TRADE_LEVERAGE_CAP); else the
+                // highest strategy leverage, lowered where the symbol allows less.
+                const symbolLeverage = config.autoTrade.useSymbolMaxLeverage
+                    ? (this.cappedMaxLeverage(symbol, this.config.amount / this.config.leverage) || leverage)
+                    : Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);
                 const isolated = this.binance.isIsolatedCached(symbol);
                 if (isolated && this.binance.getLeverageCached(symbol) === symbolLeverage) continue;
                 try {
@@ -299,23 +304,34 @@ class LightningAutoTrader {
      * their ROI is recomputed with the capped leverage. Unknown max (brackets not loaded) = as configured.
      */
     profileForSymbol(profile, symbol) {
-        const maxLeverage = this.binance.getMaxLeverageCached(symbol, profile.amount);
-        if (!maxLeverage || profile.leverage <= maxLeverage) return profile;
+        // Isolated margin = the max loss of the trade: keep it, so a different leverage means a different notional.
+        const margin = profile.amount / profile.leverage;
+        const symbolMax = this.cappedMaxLeverage(symbol, margin);
+        if (!symbolMax) return profile;
+        // AUTO_TRADE_LEVERAGE_MAX: always the symbol's max (under the cap); otherwise only lower a too-high setting.
+        const leverage = config.autoTrade.useSymbolMaxLeverage ? symbolMax : Math.min(profile.leverage, symbolMax);
+        if (leverage === profile.leverage) return profile;
 
-        // Isolated margin = the max loss of the trade: keep it, so a lower leverage means a smaller notional.
-        const amount = profile.amount * maxLeverage / profile.leverage;
-        console.log(`⚙️ [LEVERAGE] ${symbol} max ${maxLeverage}x < ${profile.name} ${profile.leverage}x — using ${maxLeverage}x, notional ${amount}u (same margin)`);
+        const amount = margin * leverage;
+        console.log(`⚙️ [LEVERAGE] ${symbol} max ${symbolMax}x, ${profile.name} ${profile.leverage}x — using ${leverage}x, notional ${amount}u (same margin)`);
         return {
             ...profile,
-            leverage: maxLeverage,
+            leverage,
             amount,
             risk: profile.risk && {
                 ...profile.risk,
-                initialSlRoiPct: profile.slPct * maxLeverage,
-                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * maxLeverage : 0,
-                trailing: trailingFromPricePct(profile.trail, maxLeverage)
+                initialSlRoiPct: profile.slPct * leverage,
+                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * leverage : 0,
+                trailing: trailingFromPricePct(profile.trail, leverage)
             }
         };
+    }
+
+    /** The symbol's max leverage for this margin, held under AUTO_TRADE_LEVERAGE_CAP (0 = no cap). */
+    cappedMaxLeverage(symbol, margin) {
+        const max = this.binance.getMaxLeverageForMargin(symbol, margin);
+        const cap = config.autoTrade.leverageCap;
+        return max && cap > 0 ? Math.min(max, cap) : max;
     }
 
     /**
