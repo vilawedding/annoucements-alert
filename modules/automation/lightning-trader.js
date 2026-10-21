@@ -5,10 +5,18 @@ const storage = require('../storage');
 const perfOptimizer = require('./performance-optimizer');
 const fastCache = require('./fast-cache');
 const { createPositionManager } = require('../trading/position-manager');
+const { trailingFromPricePct } = require('../trading/trade-engine');
+const { BybitSpot } = require('../trading/bybit-spot');
+const { BybitSpotManager } = require('../trading/bybit-spot-manager');
+
+// Never bought on the Bybit spot route (no listing pump: ~0% in the backtest).
+const STABLECOINS = new Set(['USDT', 'USDC', 'USDE', 'USDS', 'USD1', 'RLUSD', 'PYUSD', 'FDUSD', 'TUSD', 'DAI', 'USDD', 'XAUT', 'PAXG', 'EURC']);
 
 const PRECISION_REFRESH_MS = 5 * 60 * 1000;
 const CONNECTION_KEEPALIVE_MS = 15000;
 const WARM_SOCKETS = 3;
+// 2 signed calls per symbol: ~10 req/s, far below the API limits, done in ~2 min for ~600 symbols.
+const MARGIN_PREP_SPACING_MS = 200;
 
 /**
  * Lightning-Fast Auto Trader
@@ -20,6 +28,8 @@ class LightningAutoTrader {
         this.config = config.autoTrade;
         this.binance = trading.binance;
         this.telegramQueue = [];
+        // Symbols with an entry order on its way (not yet in the position manager)
+        this.entriesInFlight = new Set();
         this.isSendingTelegram = false;
         this.fastModeSkipTradableCheck = process.env.AUTO_TRADE_FAST_SKIP_TRADABLE_CHECK !== 'false';
         this.marketFirstAsyncProtection = process.env.AUTO_TRADE_MARKET_FIRST_ASYNC_PROTECTION !== 'false';
@@ -28,6 +38,16 @@ class LightningAutoTrader {
         // Market entry here, then protective orders / trailing / PnL in the position manager.
         // POSITION_MANAGER_ENABLED=false keeps the old one-shot market+TP/SL path.
         this.positionManager = config.positionManager.enabled ? createPositionManager() : null;
+        this.tradableSymbolSet = new Set();
+        const bybitClient = new BybitSpot();
+        this.bybitSpot = bybitClient.enabled
+            ? new BybitSpotManager({
+                client: bybitClient,
+                notify: (message, channel) => telegram.notify(message, channel),
+                settings: config.strategies.upbitListingBybitSpot,
+                storageFile: require('path').join(__dirname, '..', '..', config.storage.bybitSpotPositionsFile)
+            })
+            : null;
     }
     
     /**
@@ -43,6 +63,7 @@ class LightningAutoTrader {
         if (this.positionManager) {
             await this.positionManager.start().catch(error => console.error(`[WARMUP] position manager start failed: ${error.message}`));
         }
+        if (this.bybitSpot) this.bybitSpot.start();
 
         if (!this.config.enabled) return;
 
@@ -50,6 +71,8 @@ class LightningAutoTrader {
             try {
                 const precisions = await this.binance.loadTradableSymbolPrecisions();
                 precisions.forEach((precision, symbol) => fastCache.cacheSymbolPrecision(symbol, precision));
+                this.tradableSymbols = [...precisions.keys()];
+                if (this.tradableSymbols.length > 0) this.tradableSymbolSet = new Set(this.tradableSymbols);
                 return precisions.size;
             } catch (error) {
                 console.error(`[WARMUP] precision preload failed: ${error.message}`);
@@ -72,40 +95,28 @@ class LightningAutoTrader {
         const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
         console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
 
-        // Isolated margin must be set before the position exists, so do every symbol up front
-        // (and again on each bracket refresh, which picks up new listings).
-        if (config.autoTrade.isolated) {
-            const isolate = async () => {
-                try {
-                    const { done, failed } = await this.binance.isolateAll();
-                    if (done || failed) console.log(`🧱 [MARGIN] ISOLATED set on ${done} symbols${failed ? `, ${failed} failed (open position/orders?)` : ''}`);
-                } catch (error) {
-                    console.error(`[MARGIN] isolate failed: ${error.message}`);
-                }
-            };
-            isolate();
-            setInterval(async () => { await refreshLeverageBrackets(); isolate(); }, PRECISION_REFRESH_MS);
-        }
+        // Bybit spot pairs (route for Upbit KRW listings without a Binance perp)
+        const refreshBybitPairs = async () => {
+            if (!this.bybitSpot || !this.config.upbitListingBybitSpot) return;
+            try {
+                const n = await this.bybitSpot.client.loadInstruments();
+                console.log(`🟠 [WARMUP] Bybit ${this.bybitSpot.client.cfg.testnet ? 'TESTNET ' : ''}spot: ${n} USDT pairs`);
+            } catch (error) {
+                console.error(`[WARMUP] Bybit spot pairs failed: ${error.message}`);
+            }
+        };
+        refreshBybitPairs();
 
-        // Max-leverage mode: set each symbol's leverage ahead so even its first order opens with it.
-        // Sized with the default margin; profiles with their own amount are corrected per order.
-        if (config.autoTrade.useSymbolMaxLeverage) {
-            const presetLeverage = async () => {
-                try {
-                    const { done, failed } = await this.binance.presetLeverageAll(
-                        (symbol) => this.cappedMaxLeverage(symbol, this.config.amount)
-                    );
-                    if (done || failed) console.log(`⚙️ [LEVERAGE] Pre-set max leverage on ${done} symbols${failed ? `, ${failed} failed` : ''}`);
-                } catch (error) {
-                    console.error(`[LEVERAGE] preset failed: ${error.message}`);
-                }
-            };
-            presetLeverage();
-            setInterval(async () => { await refreshLeverageBrackets(); presetLeverage(); }, PRECISION_REFRESH_MS);
-        }
+        // Background: never awaited, the monitors start right away. Symbols listed later are picked
+        // up on the next refresh.
+        this.prepareMargin().catch(error => console.error(`[MARGIN] prepare failed: ${error.message}`));
 
-        setInterval(refreshPrecisions, PRECISION_REFRESH_MS);
-        setInterval(refreshLeverageBrackets, PRECISION_REFRESH_MS);
+        setInterval(async () => {
+            await refreshPrecisions();
+            await refreshLeverageBrackets();
+            await refreshBybitPairs();
+            this.prepareMargin().catch(error => console.error(`[MARGIN] prepare failed: ${error.message}`));
+        }, PRECISION_REFRESH_MS);
         // Concurrent pings keep several sockets warm (order + parallel tokens + leverage).
         const keepWarm = () => {
             for (let i = 0; i < WARM_SOCKETS; i++) {
@@ -114,6 +125,41 @@ class LightningAutoTrader {
         };
         keepWarm();
         setInterval(keepWarm, CONNECTION_KEEPALIVE_MS);
+    }
+
+    /**
+     * ISOLATED margin + leverage set ahead on every tradable symbol, so the order path does not wait
+     * on them and the loss of a trade is capped at its margin. Margin type cannot change once a
+     * position is open, so it must happen before the signal. Leverage = the highest strategy
+     * leverage, capped per symbol; the trade still sets its own profile's leverage after the order.
+     */
+    async prepareMargin() {
+        if (this.preparingMargin || !this.tradableSymbols) return;
+        this.preparingMargin = true;
+        const profiles = Object.values(config.strategies);
+        const leverage = Math.max(this.config.leverage, ...profiles.map(p => p.leverage));
+        const amount = Math.max(this.config.amount, ...profiles.map(p => p.amount));
+        let done = 0, failed = 0;
+        try {
+            for (const symbol of this.tradableSymbols) {
+                if (this.binance.isIsolatedCached(symbol)) continue;
+                try {
+                    await this.binance.ensureIsolated(symbol);
+                    const symbolLeverage = config.autoTrade.useSymbolMaxLeverage
+                        ? (this.cappedMaxLeverage(symbol, this.config.amount / this.config.leverage) || leverage)
+                        : Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);
+                    await this.binance.changeInitialLeverage(symbol, symbolLeverage);
+                    done++;
+                } catch (error) {
+                    failed++;
+                    console.warn(`[MARGIN] ${symbol}: ${error.response?.data?.msg || error.message}`);
+                }
+                await new Promise(resolve => setTimeout(resolve, MARGIN_PREP_SPACING_MS));
+            }
+        } finally {
+            this.preparingMargin = false;
+        }
+        if (done || failed) console.log(`⚙️ [MARGIN] ISOLATED + leverage set on ${done} symbols (${failed} failed)`);
     }
 
     /**
@@ -208,22 +254,22 @@ class LightningAutoTrader {
         if (exchange === 'BINANCE' && category === 'LISTING') key = 'binanceListing';
         if (exchange === 'BINANCE' && category === 'DELISTING') key = 'binanceDelisting';
         if (!key) {
-            return { name: 'default', leverage: this.config.leverage, amount: this.config.amount, notional: this.config.amount * this.config.leverage, risk: null };
+            return { name: 'default', leverage: this.config.leverage, amount: this.config.amount, risk: null };
         }
         const p = config.strategies[key];
-        const margin = p.amount > 0 ? p.amount : this.config.amount;
         return {
             name: key,
             leverage: p.leverage,
-            amount: margin,
-            notional: margin * p.leverage,
+            amount: p.amount > 0 ? p.amount : this.config.amount,
             slPct: p.slPct,
             tpPct: p.tpPct,
+            trail: p.trail,
             risk: {
                 name: key,
                 initialSlRoiPct: p.slPct * p.leverage,
                 tpRoiPct: p.tpPct > 0 ? p.tpPct * p.leverage : 0,
-                trailing: null,
+                // null = no trailing (default): hold to SL / TP / time stop
+                trailing: trailingFromPricePct(p.trail, p.leverage),
                 maxHoldMin: p.maxHoldMin
             }
         };
@@ -234,31 +280,35 @@ class LightningAutoTrader {
      * a higher one, and the position kept whatever leverage it had). Strategy SL/TP are price %, so
      * their ROI is recomputed with the capped leverage. Unknown max (brackets not loaded) = as configured.
      */
+    profileForSymbol(profile, symbol) {
+        // Isolated margin = the max loss of the trade: keep it, so a different leverage means a different notional.
+        const margin = profile.amount / profile.leverage;
+        const symbolMax = this.cappedMaxLeverage(symbol, margin);
+        if (!symbolMax) return profile;
+        // AUTO_TRADE_LEVERAGE_MAX: always the symbol's max (under the cap); otherwise only lower a too-high setting.
+        const leverage = config.autoTrade.useSymbolMaxLeverage ? symbolMax : Math.min(profile.leverage, symbolMax);
+        if (leverage === profile.leverage) return profile;
+
+        const amount = margin * leverage;
+        console.log(`⚙️ [LEVERAGE] ${symbol} max ${symbolMax}x, ${profile.name} ${profile.leverage}x — using ${leverage}x, notional ${amount}u (same margin)`);
+        return {
+            ...profile,
+            leverage,
+            amount,
+            risk: profile.risk && {
+                ...profile.risk,
+                initialSlRoiPct: profile.slPct * leverage,
+                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * leverage : 0,
+                trailing: trailingFromPricePct(profile.trail, leverage)
+            }
+        };
+    }
+
     /** The symbol's max leverage for this margin, held under AUTO_TRADE_LEVERAGE_CAP (0 = no cap). */
     cappedMaxLeverage(symbol, margin) {
         const max = this.binance.getMaxLeverageForMargin(symbol, margin);
         const cap = config.autoTrade.leverageCap;
         return max && cap > 0 ? Math.min(max, cap) : max;
-    }
-
-    profileForSymbol(profile, symbol) {
-        const maxLeverage = this.cappedMaxLeverage(symbol, profile.amount);
-        if (!maxLeverage) return profile;
-        // LEVERAGE_USE_SYMBOL_MAX: always the symbol's max; otherwise only cap a too-high setting.
-        if (!config.autoTrade.useSymbolMaxLeverage && profile.leverage <= maxLeverage) return profile;
-        if (maxLeverage === profile.leverage) return profile;
-
-        console.log(`⚙️ [LEVERAGE] ${symbol} max ${maxLeverage}x (${profile.name} configured ${profile.leverage}x) — using ${maxLeverage}x`);
-        return {
-            ...profile,
-            leverage: maxLeverage,
-            notional: profile.amount * maxLeverage,
-            risk: profile.risk && {
-                ...profile.risk,
-                initialSlRoiPct: profile.slPct * maxLeverage,
-                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * maxLeverage : 0
-            }
-        };
     }
 
     /**
@@ -269,22 +319,97 @@ class LightningAutoTrader {
         if (!this.config.enabled) return null;
         if (!announcement) return null;
 
+        // Upbit KRW listing tokens without a Binance perp go to Bybit SPOT; the rest stays on Binance.
+        const spot = this._bybitSpotListing(announcement);
+        const [spotResults, binanceResults] = await Promise.all([
+            spot ? spot.results : null,
+            this._executeBinance(spot ? spot.rest : announcement)
+        ]);
+        const all = [...(spotResults || []), ...(binanceResults || [])];
+        return all.length > 0 ? all : null;
+    }
+
+    _hasBinancePerp(token) {
+        return ['', '1000', '1000000'].some(prefix => this.tradableSymbolSet.has(`${prefix}${token}USDT`));
+    }
+
+    /**
+     * Bybit SPOT route for an Upbit listing: KRW market (BTC/USDT-only listings lost in the backtest),
+     * not a stablecoin, no Binance perp, a USDT pair on Bybit. Returns null when nothing is routed,
+     * else { results: Promise<result[]>, rest: announcement with the remaining tokens for Binance }.
+     */
+    _bybitSpotListing(announcement) {
+        if (!this.bybitSpot || !this.config.upbitListingBybitSpot) return null;
+        if (String(announcement.exchange).toUpperCase() !== 'UPBIT' || String(announcement.category).toUpperCase() !== 'LISTING') return null;
+        if (!/KRW/.test(announcement.title || '')) return null;
+        if (!this._isFresh(announcement, false)) return null; // the Binance path logs the skip
+        if (this.tradableSymbolSet.size === 0) {
+            console.log(`⏭️ [BYBIT-SPOT] skip: Binance symbols not loaded, cannot tell which tokens lack a perp — ${announcement.title}`);
+            return null;
+        }
+
+        const tokens = Array.isArray(announcement.tokens) ? announcement.tokens : [];
+        const routed = [];
+        for (const token of tokens) {
+            const symbol = `${token}USDT`;
+            if (STABLECOINS.has(token) || this._hasBinancePerp(token)) continue;
+            if (!this.bybitSpot.client.hasPair(symbol)) {
+                console.log(`⏭️ [BYBIT-SPOT] ${token}: no Binance perp and no Bybit spot pair`);
+                continue;
+            }
+            if (this.entriesInFlight.has(`BYBIT:${symbol}`) || this.bybitSpot.positions.has(symbol)) {
+                console.log(`⏭️ [BYBIT-SPOT] skip ${symbol}: position already open`);
+                continue;
+            }
+            routed.push(token);
+        }
+        if (routed.length === 0) return null;
+
+        const source = { exchange: 'UPBIT', category: 'LISTING', title: announcement.title || '', hash: announcement.hash || null };
+        const results = Promise.all(routed.map(async (token) => {
+            const symbol = `${token}USDT`;
+            const key = `BYBIT:${symbol}`;
+            this.entriesInFlight.add(key);
+            const startedAt = Date.now();
+            try {
+                return await this.bybitSpot.open({ symbol, token, source });
+            } catch (error) {
+                console.error(`[BYBIT-SPOT] ${symbol} buy failed in ${Date.now() - startedAt}ms: ${error.message}`);
+                this.queueTelegramMessage(telegram.createErrorMessage(token, `${symbol} (Bybit spot)`, error.message));
+                return { token, symbol, success: false, venue: 'BYBIT_SPOT', error: error.message, duration: Date.now() - startedAt };
+            } finally {
+                this.entriesInFlight.delete(key);
+            }
+        }));
+        return { results, rest: { ...announcement, tokens: tokens.filter(t => !routed.includes(t)) } };
+    }
+
+    /**
+     * Freshness guard: trade only signals published moments ago. Without it, any notice the bot had
+     * not seen before (first run, restart, a proxy missing the baseline poll) was traded as if new —
+     * on 2026-10-13 a restart opened 6 demo positions on 1h–5 week old news.
+     */
+    _isFresh(announcement, log = true) {
         const exchange = String(announcement.exchange || '').toUpperCase();
         const category = String(announcement.category || '').toUpperCase();
-
-        // Freshness guard: trade only signals published moments ago. Without it, any notice the
-        // bot had not seen before (first run, restart, a proxy missing the baseline poll) was
-        // traded as if new — on 2026-10-13 a restart opened 6 demo positions on 1h–5 week old news.
         const publishedAt = Number(announcement.releaseDate);
         const ageMs = Date.now() - publishedAt;
         if (!(publishedAt > 0)) {
-            console.log(`⏭️ [TRADE] skip ${exchange} ${category}: no publication time — ${announcement.title}`);
-            return null;
+            if (log) console.log(`⏭️ [TRADE] skip ${exchange} ${category}: no publication time — ${announcement.title}`);
+            return false;
         }
         if (ageMs > this.config.maxSignalAgeSec * 1000) {
-            console.log(`⏭️ [TRADE] skip ${exchange} ${category}: published ${Math.round(ageMs / 1000)}s ago (> ${this.config.maxSignalAgeSec}s) — ${announcement.title}`);
-            return null;
+            if (log) console.log(`⏭️ [TRADE] skip ${exchange} ${category}: published ${Math.round(ageMs / 1000)}s ago (> ${this.config.maxSignalAgeSec}s) — ${announcement.title}`);
+            return false;
         }
+        return true;
+    }
+
+    async _executeBinance(announcement) {
+        const exchange = String(announcement.exchange || '').toUpperCase();
+        const category = String(announcement.category || '').toUpperCase();
+
+        if (!this._isFresh(announcement)) return null;
 
         if (exchange === 'UPBIT') {
             if (category === 'LISTING') {
@@ -329,6 +454,30 @@ class LightningAutoTrader {
             : this.extractTokensFast(announcement.title || '');
         if (tokens.length === 0) return null;
 
+        // One position per symbol: a token whose symbol already has an open position (or an entry on
+        // its way) is skipped, other symbols trade as usual. Checked and claimed synchronously, so two
+        // signals for the same symbol (e.g. Upbit warning then delisting) cannot both pass.
+        const busy = tokens.filter(token => this._symbolBusy(`${token}USDT`));
+        if (busy.length > 0) {
+            console.log(`⏭️ [TRADE] skip ${busy.map(t => `${t}USDT`).join(',')}: position already open — ${exchange} ${category} ${announcement.title}`);
+        }
+        const free = [...new Set(tokens.filter(token => !busy.includes(token)))];
+        if (free.length === 0) return null;
+
+        const symbols = free.map(token => `${token}USDT`);
+        symbols.forEach(symbol => this.entriesInFlight.add(symbol));
+        try {
+            return await this._executeEntries(announcement, exchange, category, free);
+        } finally {
+            symbols.forEach(symbol => this.entriesInFlight.delete(symbol));
+        }
+    }
+
+    _symbolBusy(symbol) {
+        return this.entriesInFlight.has(symbol) || Boolean(this.positionManager?.positions?.has(symbol));
+    }
+
+    async _executeEntries(announcement, exchange, category, tokens) {
         const takeProfitPercent = exchange === 'BINANCE'
             ? this.config.takeProfitPercentBinance
             : exchange === 'BITHUMB'
@@ -384,20 +533,21 @@ class LightningAutoTrader {
                 
                 const side = isShort ? 'SELL' : 'BUY';
 
-                // Normally already done at warmup; only a symbol newer than the last refresh waits here.
-                if (config.autoTrade.isolated) {
-                    await this.binance.ensureIsolated(symbol).catch((error) => {
-                        console.warn(`[MARGIN] ${symbol} isolate failed: ${error.response?.data?.msg || error.message}`);
+                // Normally already done by prepareMargin(); awaited only for a symbol it has not reached
+                // (fresh start, new listing). A trade that cannot be isolated is not placed.
+                if (!this.binance.isIsolatedCached(symbol)) {
+                    await this.binance.ensureIsolated(symbol).catch(error => {
+                        throw new Error(`cannot set ISOLATED margin: ${error.response?.data?.msg || error.message}`);
                     });
                 }
 
                 // Place order with TP/SL using fast retry
                 const tradeFn = this.positionManager
-                    ? () => this.binance.trading.marketEntry(symbol, side, profile.notional, precision)
+                    ? () => this.binance.trading.marketEntry(symbol, side, profile.amount, precision)
                     : isShort
                     ? () => this.binance.trading.marketSellWithTPSL(
                         symbol,
-                        profile.notional,
+                        profile.amount,
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
@@ -406,7 +556,7 @@ class LightningAutoTrader {
                     )
                     : () => this.binance.trading.marketBuyWithTPSL(
                         symbol,
-                        profile.notional,
+                        profile.amount,
                         takeProfitPercent,
                         this.config.stopLossPercent,
                         'BOTH',
@@ -502,7 +652,7 @@ class LightningAutoTrader {
                 this.queueTelegramMessage(errorMessage);
             }
         }));
-        
+
         const totalDuration = Date.now() - executionStartTime;
         perfOptimizer.recordMetric('tradingExecution', totalDuration);
         

@@ -24,6 +24,18 @@ function numEnv(name, defaultValue) {
     return Number.isFinite(value) ? value : defaultValue;
 }
 
+/**
+ * Trailing SL of a strategy in PRICE % (converted to ROI with the trade's leverage):
+ * <PREFIX>_TRAIL_ACTIVATE_PCT (0 = off), _TRAIL_STEP_PCT (0 = activate), _TRAIL_GIVEBACK_PCT (0 = ladder only).
+ */
+function strategyTrail(prefix) {
+    return {
+        activatePct: numEnv(`${prefix}_TRAIL_ACTIVATE_PCT`, 0),
+        stepPct: numEnv(`${prefix}_TRAIL_STEP_PCT`, 0),
+        givebackPct: numEnv(`${prefix}_TRAIL_GIVEBACK_PCT`, 0)
+    };
+}
+
 function parseNumberList(value, defaultValue) {
     const items = String(value || '').split(',').map(v => v.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
     return items.length > 0 ? items : defaultValue;
@@ -180,6 +192,15 @@ module.exports = {
 
     // cryptolisting.ws announcement socket: extra source for the enabled exchanges above, traded like
     // their own feeds (first source wins). jp endpoint = Binance + Upbit + Bithumb.
+    // Bybit V5 (Unified Trading Account), SPOT only. BYBIT_TESTNET=true -> api-testnet.bybit.com.
+    bybit: {
+        apiKey: process.env.BYBIT_API_KEY || '',
+        apiSecret: process.env.BYBIT_API_SECRET || '',
+        testnet: parseBooleanEnv(process.env.BYBIT_TESTNET, true),
+        baseUrl: process.env.BYBIT_BASE_URL
+            || (parseBooleanEnv(process.env.BYBIT_TESTNET, true) ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com')
+    },
+
     cryptolisting: {
         enabled: parseBooleanEnv(process.env.CRYPTOLISTING_ENABLED, false),
         apiKey: process.env.CRYPTOLISTING_API_KEY || '',
@@ -197,6 +218,9 @@ module.exports = {
         // Only Upbit listings that open a KRW market (backtest: non-KRW listings pump ~10%
         // vs ~27% and are only profitable with a ≤1-2s entry)
         upbitKrwOnly: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_KRW_ONLY, false),
+        // Upbit KRW listing of a token WITHOUT a Binance perp: buy it on Bybit SPOT instead
+        // (backtest 2026-10-20, 26 listings 2023-2026). Independent of AUTO_TRADE_UPBIT_LISTING.
+        upbitListingBybitSpot: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_LISTING_BYBIT_SPOT, false),
         // SHORT on Upbit investment warning (거래 유의 종목 지정) / delisting (거래지원 종료).
         // Own risk profiles below (config.strategies).
         upbitWarning: parseBooleanEnv(process.env.AUTO_TRADE_UPBIT_WARNING, false),
@@ -208,12 +232,10 @@ module.exports = {
         binanceDelisting: process.env.AUTO_TRADE_BINANCE_DELISTING === 'true',
         amount: parseFloat(process.env.AUTO_TRADE_AMOUNT) || 10,
         leverage: parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5,
-        // true = every order uses the symbol's own max leverage (all profiles); false = configured
-        // leverage, only capped down when the symbol allows less
-        // ISOLATED margin on every traded symbol (set before the order; false = leave the account's mode)
-        isolated: parseBooleanEnv(process.env.AUTO_TRADE_ISOLATED, true),
         // Upper bound on any order's leverage (0 = none). Keeps SL inside the liquidation distance.
         leverageCap: numEnv('AUTO_TRADE_LEVERAGE_CAP', 20),
+        // true = every order uses the symbol's own max leverage (all profiles); false = configured
+        // leverage, only capped down when the symbol allows less
         useSymbolMaxLeverage: parseBooleanEnv(process.env.AUTO_TRADE_LEVERAGE_MAX, false),
         stopLossPercent: parseFloat(process.env.AUTO_TRADE_SL_PERCENT) || 1.0,
         takeProfitPercent: parseFloat(process.env.AUTO_TRADE_TP_PERCENT) || 200.0,
@@ -268,7 +290,8 @@ module.exports = {
             amount: numEnv('UPBIT_WARNING_AMOUNT', 0),          // 0 = AUTO_TRADE_AMOUNT
             slPct: numEnv('UPBIT_WARNING_SL_PCT', 5),
             tpPct: numEnv('UPBIT_WARNING_TP_PCT', 0),
-            maxHoldMin: numEnv('UPBIT_WARNING_MAX_HOLD_MIN', 1440)
+            maxHoldMin: numEnv('UPBIT_WARNING_MAX_HOLD_MIN', 1440),
+            trail: strategyTrail('UPBIT_WARNING')
         },
         // LONG "Binance Will List X" (token already has a perp, n=39): the move keeps going for an
         // hour (price@1h +11% median) — hold with a plain SL, no TP / trailing.
@@ -277,7 +300,8 @@ module.exports = {
             amount: numEnv('BINANCE_LISTING_AMOUNT', 0),
             slPct: numEnv('BINANCE_LISTING_SL_PCT', 5),
             tpPct: numEnv('BINANCE_LISTING_TP_PCT', 0),
-            maxHoldMin: numEnv('BINANCE_LISTING_MAX_HOLD_MIN', 60)
+            maxHoldMin: numEnv('BINANCE_LISTING_MAX_HOLD_MIN', 60),
+            trail: strategyTrail('BINANCE_LISTING')
         },
         // SHORT "Binance Will Delist X, Y" (backtest 2026-10-14, n=78, 20s latency): hold 240m, wide SL —
         // SL 3-5% gets swept (win 26-33%), no SL has a 130% squeeze tail. Leverage kept low for that tail.
@@ -286,14 +310,23 @@ module.exports = {
             amount: numEnv('BINANCE_DELISTING_AMOUNT', 0),
             slPct: numEnv('BINANCE_DELISTING_SL_PCT', 10),
             tpPct: numEnv('BINANCE_DELISTING_TP_PCT', 0),
-            maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240)
+            maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240),
+            trail: strategyTrail('BINANCE_DELISTING')
+        },
+        // LONG on Bybit SPOT for Upbit KRW listings without a Binance perp (no leverage).
+        // Backtest 1s, lag 5s: hold 5-15m with SL 5% ~ +10% median per trade, 65% win.
+        upbitListingBybitSpot: {
+            amount: numEnv('BYBIT_SPOT_LISTING_AMOUNT', 100),     // USDT spent per listing
+            slPct: numEnv('BYBIT_SPOT_LISTING_SL_PCT', 5),
+            maxHoldMin: numEnv('BYBIT_SPOT_LISTING_MAX_HOLD_MIN', 15)
         },
         upbitDelisting: {
             leverage: numEnv('UPBIT_DELISTING_LEVERAGE', 5),
             amount: numEnv('UPBIT_DELISTING_AMOUNT', 0),
             slPct: numEnv('UPBIT_DELISTING_SL_PCT', 5),
             tpPct: numEnv('UPBIT_DELISTING_TP_PCT', 0),
-            maxHoldMin: numEnv('UPBIT_DELISTING_MAX_HOLD_MIN', 240)
+            maxHoldMin: numEnv('UPBIT_DELISTING_MAX_HOLD_MIN', 240),
+            trail: strategyTrail('UPBIT_DELISTING')
         }
     },
 
@@ -314,6 +347,7 @@ module.exports = {
     // Storage Configuration
     storage: {
         positionsFile: 'data/positions.json',
+        bybitSpotPositionsFile: 'data/bybit_spot_positions.json',
         // Persistent "already seen" notice keys (restart must not re-alert / re-trade old notices)
         seenUpbitFile: 'data/seen_upbit.json',
         seenBithumbFile: 'data/seen_bithumb.json',

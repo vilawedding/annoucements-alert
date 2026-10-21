@@ -25,10 +25,8 @@ let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
 const deliveryTimes = new Map();
 // symbol -> leverage brackets [{ initialLeverage, notionalFloor, notionalCap }] ascending by notional
 const leverageBrackets = new Map();
-// symbols confirmed on ISOLATED margin this run
+// Symbols confirmed on ISOLATED margin in this process
 const isolatedSymbols = new Set();
-// symbol -> leverage last pre-set this run
-const presetLeverages = new Map();
 let isServerTimeSyncing = false;
 
 function syncServerTimeInBackground() {
@@ -295,61 +293,27 @@ const account = {
         return best || null;
     },
 
-    /** Put the symbol on ISOLATED margin once (remembered). -4046 = already isolated. */
+    async changeMarginType(symbol, marginType) {
+        return await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType }, true);
+    },
+
+    /**
+     * Isolated margin caps a position's loss at its own margin (cross draws on the whole wallet).
+     * Binance refuses the change while the symbol has a position or open orders, so it is set ahead
+     * of the order. -4046 = "No need to change margin type" (already isolated).
+     */
     async ensureIsolated(symbol) {
         if (isolatedSymbols.has(symbol)) return;
         try {
             await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType: 'ISOLATED' }, true);
         } catch (error) {
-            const code = error.response?.data?.code;
-            if (code !== -4046) throw error;
+            if (error.response?.data?.code !== -4046) throw error;
         }
         isolatedSymbols.add(symbol);
     },
 
-    /** Isolate every USDT symbol (startup / refresh; skips ones already done). Returns { done, failed }. */
-    async isolateAll(concurrency = 8) {
-        const symbols = [...leverageBrackets.keys()].filter(s => s.endsWith('USDT') && !isolatedSymbols.has(s));
-        let done = 0;
-        let failed = 0;
-        let next = 0;
-        const worker = async () => {
-            while (next < symbols.length) {
-                const symbol = symbols[next++];
-                try { await account.ensureIsolated(symbol); done++; } catch { failed++; }
-            }
-        };
-        await Promise.all(Array.from({ length: concurrency }, worker));
-        return { done, failed };
-    },
-
-    /**
-     * Pre-set each USDT symbol's leverage so the first order already opens with it (the per-order
-     * change races the order). Symbols already at the wanted value this run are skipped.
-     */
-    async presetLeverageAll(leverageFor, concurrency = 8) {
-        const symbols = [...leverageBrackets.keys()].filter(s => s.endsWith('USDT'));
-        let done = 0;
-        let failed = 0;
-        let next = 0;
-        const worker = async () => {
-            while (next < symbols.length) {
-                const symbol = symbols[next++];
-                const leverage = leverageFor(symbol);
-                if (!leverage || presetLeverages.get(symbol) === leverage) continue;
-                try {
-                    await account.changeInitialLeverage(symbol, leverage);
-                    presetLeverages.set(symbol, leverage);
-                    done++;
-                } catch { failed++; }
-            }
-        };
-        await Promise.all(Array.from({ length: concurrency }, worker));
-        return { done, failed };
-    },
-
-    async changeMarginType(symbol, marginType) {
-        return await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType }, true);
+    isIsolatedCached(symbol) {
+        return isolatedSymbols.has(symbol);
     },
 
     /** Fills of this account on a symbol since startTime (realizedPnl + commission per fill). */
@@ -981,8 +945,7 @@ module.exports = {
     getMaxLeverageCached: account.getMaxLeverageCached,
     getMaxLeverageForMargin: account.getMaxLeverageForMargin,
     ensureIsolated: account.ensureIsolated,
-    isolateAll: account.isolateAll,
-    presetLeverageAll: account.presetLeverageAll,
+    isIsolatedCached: account.isIsolatedCached,
     getSymbolPrecision: utils.getSymbolPrecision,
     loadTradableSymbolPrecisions: marketData.loadTradableSymbolPrecisions.bind(marketData),
     testConnectivity: marketData.testConnectivity,

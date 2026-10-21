@@ -67,6 +67,7 @@ function startHealthServer() {
                 binancePriceStream: lightningTrader.binance.priceStream.getHealth()
             },
             positions: lightningTrader.positionManager ? lightningTrader.positionManager.getHealth() : { enabled: false },
+            bybitSpot: lightningTrader.bybitSpot ? lightningTrader.bybitSpot.getHealth() : { enabled: false },
             performance: {
                 announcementDetection: perfStats.announcementDetection,
                 tokenExtraction: perfStats.tokenExtraction,
@@ -153,7 +154,8 @@ async function executeTrade(a) {
         console.log(`✅ [TRADE] ${successCount}/${tradeResults.length} | ${tradeDuration}ms | ${totalDuration}ms | ${formatTime(detectionTime)} → ${formatTime(endTime)} | ${orderText || 'NO_SUCCESS_ORDER'}`);
 
         // Failures are already reported to the order chat by lightningTrader.
-        tradeResults.filter(r => r.success).forEach(r => telegram.notify(telegram.createTradeMessage(r, a), 'order'));
+        // Venues that send their own fill message (Bybit spot) are marked `notified`.
+        tradeResults.filter(r => r.success && !r.notified).forEach(r => telegram.notify(telegram.createTradeMessage(r, a), 'order'));
     }
 }
 

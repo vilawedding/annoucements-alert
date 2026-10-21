@@ -16,7 +16,9 @@
     "probe:relay": "node scripts/tests/probe-relay.js",
     "test:positions": "node scripts/tests/test-position-manager.js",
     "test:cryptolisting": "node scripts/tests/test-cryptolisting.js",
-    "check:cryptolisting": "node scripts/tests/check-cryptolisting.js"
+    "check:cryptolisting": "node scripts/tests/check-cryptolisting.js",
+    "test:bybit-spot": "node --require ./preload.js scripts/tests/test-bybit-spot.js",
+    "check:bybit-spot": "node scripts/tests/check-bybit-spot.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

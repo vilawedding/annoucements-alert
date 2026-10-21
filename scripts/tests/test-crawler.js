@@ -503,10 +503,11 @@ test('trader never trades a signal older than AUTO_TRADE_MAX_SIGNAL_AGE_SEC', as
 
 test('trader shorts Binance spot/futures delists only, never margin / unknown scope', async () => {
     const trader = require('../../modules/automation/lightning-trader');
-    const real = { enabled: config.autoTrade.enabled, delisting: config.autoTrade.binanceDelisting, pm: trader.positionManager, entry: trader.binance.trading.marketEntry, skip: trader.fastModeSkipTradableCheck };
+    const real = { enabled: config.autoTrade.enabled, delisting: config.autoTrade.binanceDelisting, pm: trader.positionManager, entry: trader.binance.trading.marketEntry, skip: trader.fastModeSkipTradableCheck, isolated: trader.binance.isIsolatedCached };
     config.autoTrade.enabled = true;
     config.autoTrade.binanceDelisting = true;
-    trader.positionManager = {}; // marketEntry path
+    trader.positionManager = { positions: new Map() }; // marketEntry path, no open position
+    trader.binance.isIsolatedCached = () => true; // no margin-type call to Binance
     trader.fastModeSkipTradableCheck = true;
     const ordered = [];
     trader.binance.trading.marketEntry = async (symbol, side) => { ordered.push([symbol, side]); throw new Error('stop'); };
@@ -520,6 +521,7 @@ test('trader shorts Binance spot/futures delists only, never margin / unknown sc
         assert.deepStrictEqual(ordered, [['1000000BOBUSDT', 'SELL']], 'futures delist shorts the multiplier perp');
     } finally {
         trader.binance.trading.marketEntry = real.entry;
+        trader.binance.isIsolatedCached = real.isolated;
         trader.positionManager = real.pm;
         trader.fastModeSkipTradableCheck = real.skip;
         config.autoTrade.enabled = real.enabled;
