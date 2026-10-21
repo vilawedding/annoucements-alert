@@ -24,6 +24,17 @@ function numEnv(name, defaultValue) {
     return Number.isFinite(value) ? value : defaultValue;
 }
 
+// Isolated margin per trade when <PREFIX>_MARGIN is not set (= the max loss of a trade).
+const DEFAULT_MARGIN_USDT = 10;
+
+/**
+ * Sizes are configured as MARGIN (USDT an isolated position can lose); the order needs the notional,
+ * margin x leverage. `amount` everywhere in the code is that notional.
+ */
+function strategyAmount(prefix, defaultLeverage) {
+    return numEnv(`${prefix}_MARGIN`, DEFAULT_MARGIN_USDT) * numEnv(`${prefix}_LEVERAGE`, defaultLeverage);
+}
+
 /**
  * Trailing SL of a strategy in PRICE % (converted to ROI with the trade's leverage):
  * <PREFIX>_TRAIL_ACTIVATE_PCT (0 = off), _TRAIL_STEP_PCT (0 = activate), _TRAIL_GIVEBACK_PCT (0 = ladder only).
@@ -235,7 +246,8 @@ module.exports = {
         // "Binance Will Add New Trading Pairs" never moved the price (backtest n=32) — off by default
         binanceNewPairs: parseBooleanEnv(process.env.AUTO_TRADE_BINANCE_NEW_PAIRS, false),
         binanceDelisting: process.env.AUTO_TRADE_BINANCE_DELISTING === 'true',
-        amount: parseFloat(process.env.AUTO_TRADE_AMOUNT) || 10,
+        // Listing LONG default profile: notional = AUTO_TRADE_MARGIN x AUTO_TRADE_LEVERAGE
+        amount: numEnv('AUTO_TRADE_MARGIN', 1) * (parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5),
         leverage: parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5,
         // Upper bound on any order's leverage (0 = none). Keeps SL inside the liquidation distance.
         leverageCap: numEnv('AUTO_TRADE_LEVERAGE_CAP', 20),
@@ -292,7 +304,7 @@ module.exports = {
     strategies: {
         upbitWarning: {
             leverage: numEnv('UPBIT_WARNING_LEVERAGE', 5),
-            amount: numEnv('UPBIT_WARNING_AMOUNT', 0),          // 0 = AUTO_TRADE_AMOUNT
+            amount: strategyAmount('UPBIT_WARNING', 5),
             slPct: numEnv('UPBIT_WARNING_SL_PCT', 5),
             tpPct: numEnv('UPBIT_WARNING_TP_PCT', 0),
             maxHoldMin: numEnv('UPBIT_WARNING_MAX_HOLD_MIN', 1440),
@@ -302,7 +314,7 @@ module.exports = {
         // hour (price@1h +11% median) — hold with a plain SL, no TP / trailing.
         binanceListing: {
             leverage: numEnv('BINANCE_LISTING_LEVERAGE', 10),
-            amount: numEnv('BINANCE_LISTING_AMOUNT', 0),
+            amount: strategyAmount('BINANCE_LISTING', 10),
             slPct: numEnv('BINANCE_LISTING_SL_PCT', 5),
             tpPct: numEnv('BINANCE_LISTING_TP_PCT', 0),
             maxHoldMin: numEnv('BINANCE_LISTING_MAX_HOLD_MIN', 60),
@@ -312,7 +324,7 @@ module.exports = {
         // SL 3-5% gets swept (win 26-33%), no SL has a 130% squeeze tail. Leverage kept low for that tail.
         binanceDelisting: {
             leverage: numEnv('BINANCE_DELISTING_LEVERAGE', 3),
-            amount: numEnv('BINANCE_DELISTING_AMOUNT', 0),
+            amount: strategyAmount('BINANCE_DELISTING', 3),
             slPct: numEnv('BINANCE_DELISTING_SL_PCT', 10),
             tpPct: numEnv('BINANCE_DELISTING_TP_PCT', 0),
             maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240),
@@ -324,7 +336,7 @@ module.exports = {
         // (backtest 2026-10-21, 1s + funding: 58 listings, hold 4h SL 5% x10 -> +160u, DD 19u, win 71%).
         upbitListingShort: {
             leverage: numEnv('UPBIT_LISTING_SHORT_LEVERAGE', 10),
-            amount: numEnv('UPBIT_LISTING_SHORT_AMOUNT', 100),
+            amount: strategyAmount('UPBIT_LISTING_SHORT', 10),
             slPct: numEnv('UPBIT_LISTING_SHORT_SL_PCT', 5),
             tpPct: numEnv('UPBIT_LISTING_SHORT_TP_PCT', 0),
             maxHoldMin: numEnv('UPBIT_LISTING_SHORT_MAX_HOLD_MIN', 240),
@@ -332,13 +344,13 @@ module.exports = {
             trail: strategyTrail('UPBIT_LISTING_SHORT')
         },
         upbitListingBybitSpot: {
-            amount: numEnv('BYBIT_SPOT_LISTING_AMOUNT', 100),     // USDT spent per listing
+            amount: numEnv('BYBIT_SPOT_LISTING_MARGIN', 100),     // spot x1: USDT spent per listing
             slPct: numEnv('BYBIT_SPOT_LISTING_SL_PCT', 5),
             maxHoldMin: numEnv('BYBIT_SPOT_LISTING_MAX_HOLD_MIN', 15)
         },
         upbitDelisting: {
             leverage: numEnv('UPBIT_DELISTING_LEVERAGE', 5),
-            amount: numEnv('UPBIT_DELISTING_AMOUNT', 0),
+            amount: strategyAmount('UPBIT_DELISTING', 5),
             slPct: numEnv('UPBIT_DELISTING_SL_PCT', 5),
             tpPct: numEnv('UPBIT_DELISTING_TP_PCT', 0),
             maxHoldMin: numEnv('UPBIT_DELISTING_MAX_HOLD_MIN', 240),

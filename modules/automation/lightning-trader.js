@@ -15,6 +15,11 @@ const STABLECOINS = new Set(['USDT', 'USDC', 'USDE', 'USDS', 'USD1', 'RLUSD', 'P
 const PRECISION_REFRESH_MS = 5 * 60 * 1000;
 const CONNECTION_KEEPALIVE_MS = 15000;
 const WARM_SOCKETS = 3;
+const BALANCE_REFRESH_MS = 10000;
+// Share of the available USDT that can become margin (rest: taker fee + entry open loss)
+const BALANCE_USE_RATIO = 0.97;
+// Binance USDS-M minimum order notional for most symbols
+const MIN_ORDER_NOTIONAL = 5;
 // 2 signed calls per symbol: ~10 req/s, far below the API limits, done in ~2 min for ~600 symbols.
 const MARGIN_PREP_SPACING_MS = 200;
 
@@ -39,6 +44,7 @@ class LightningAutoTrader {
         // POSITION_MANAGER_ENABLED=false keeps the old one-shot market+TP/SL path.
         this.positionManager = config.positionManager.enabled ? createPositionManager() : null;
         this.tradableSymbolSet = new Set();
+        this.availableUsdt = null; // futures wallet available USDT (refreshBalance)
         const bybitClient = new BybitSpot();
         this.bybitSpot = bybitClient.enabled
             ? new BybitSpotManager({
@@ -94,6 +100,10 @@ class LightningAutoTrader {
 
         const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
         console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
+
+        await this.refreshBalance();
+        console.log(`💰 [WARMUP] Futures available: ${this.availableUsdt ?? 'unknown'} USDT`);
+        setInterval(() => this.refreshBalance(), BALANCE_REFRESH_MS).unref();
 
         // Bybit spot pairs (route for Upbit KRW listings without a Binance perp)
         const refreshBybitPairs = async () => {
@@ -350,6 +360,52 @@ class LightningAutoTrader {
         return this._executeBinance({ ...announcement, category: 'LISTING_SHORT' }, { freshnessChecked: true });
     }
 
+    /** Available USDT of the futures wallet, refreshed in the background (the order never waits on it). */
+    async refreshBalance() {
+        try {
+            const balances = await this.binance.account.getBalance();
+            const usdt = (balances || []).find(b => b.asset === 'USDT');
+            if (usdt) {
+                this.availableUsdt = Number(usdt.availableBalance);
+                this.balanceAt = Date.now();
+            }
+        } catch (error) {
+            console.warn(`[BALANCE] refresh failed: ${error.response?.data?.msg || error.message}`);
+        }
+    }
+
+    /**
+     * The configured margin, or the whole available balance when the wallet holds less (user rule).
+     * Reserves it locally so parallel entries do not all count the same USDT. Unknown balance = as
+     * configured (Binance rejects an order the wallet cannot cover anyway).
+     */
+    _sizeToBalance(profile, symbol) {
+        if (!this._balanceKnown()) return { profile, reservedMargin: 0 };
+        const margin = profile.amount / profile.leverage;
+        // Keep a little for the taker fee and the entry's open loss, which Binance also requires.
+        const usable = this.availableUsdt * BALANCE_USE_RATIO;
+        if (usable >= margin) {
+            this.availableUsdt -= margin;
+            return { profile, reservedMargin: margin };
+        }
+        const amount = Math.floor(usable * profile.leverage * 100) / 100;
+        if (amount < MIN_ORDER_NOTIONAL) {
+            throw new Error(`insufficient balance: ${this.availableUsdt.toFixed(2)} USDT available, ${margin} USDT margin configured`);
+        }
+        console.warn(`💸 [BALANCE] ${symbol}: only ${this.availableUsdt.toFixed(2)} USDT available < ${margin} margin — using it all (notional ${amount})`);
+        this.availableUsdt -= usable;
+        return { profile: { ...profile, amount }, reservedMargin: usable };
+    }
+
+    _releaseMargin(margin) {
+        if (margin > 0 && this._balanceKnown()) this.availableUsdt += margin;
+    }
+
+    // null >= 0 is true in JS: test the type, not a comparison.
+    _balanceKnown() {
+        return typeof this.availableUsdt === 'number' && Number.isFinite(this.availableUsdt);
+    }
+
     _hasBinancePerp(token) {
         return ['', '1000', '1000000'].some(prefix => this.tradableSymbolSet.has(`${prefix}${token}USDT`));
     }
@@ -518,9 +574,13 @@ class LightningAutoTrader {
         await Promise.all(tokens.map(async (token) => {
             const symbol = `${token}USDT`;
             const tradeStartTime = Date.now();
-            const profile = this.profileForSymbol(signalProfile, symbol);
+            let profile = this.profileForSymbol(signalProfile, symbol);
+            let reservedMargin = 0;
 
             try {
+                // Before any await: parallel tokens of one notice take the balance one after another.
+                ({ profile, reservedMargin } = this._sizeToBalance(profile, symbol));
+
                 if (this.fastModeSkipTradableCheck) {
                     const cachedTradable = this.binance.isSymbolTradableCached(symbol);
                     if (cachedTradable === false) {
@@ -658,6 +718,7 @@ class LightningAutoTrader {
                 }
                 
             } catch (error) {
+                this._releaseMargin(reservedMargin);
                 const tradeDuration = Date.now() - tradeStartTime;
                 console.error(`[TRADE] ${symbol} failed in ${tradeDuration}ms: ${error.message}`);
                 

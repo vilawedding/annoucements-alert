@@ -29,6 +29,8 @@ function fakeClient({ pairs = ['MPLXUSDT', 'ABCUSDT'], buyPrice = 0.05 } = {}) {
             calls.push(['buy', symbol, usdt]);
             return { orderId: 'b1', status: 'Filled', avgPrice: buyPrice, qty: usdt / buyPrice, value: usdt, fee: 0.1 };
         },
+        free: 1000,
+        async freeBalance() { return this.free; },
         async lastPrice() { return this.price; },
         async marketSellAll(symbol) {
             calls.push(['sell', symbol]);
@@ -58,6 +60,16 @@ const settings = { amount: 100, slPct: 5, maxHoldMin: 15 };
         client.price = 0.047; await m.tick();
         assert.ok(!m.positions.has('MPLXUSDT'), 'SL hit: closed');
         assert.deepStrictEqual(client.calls.map(c => c[0]), ['buy', 'sell']);
+    });
+
+    await test('manager: less USDT than configured -> buys with the whole free balance; too little -> no order', async () => {
+        const client = fakeClient();
+        client.free = 40;
+        const m = new BybitSpotManager({ client, settings, now: () => 1 });
+        await m.open({ symbol: 'MPLXUSDT', token: 'MPLX' });
+        assert.deepStrictEqual(client.calls[0], ['buy', 'MPLXUSDT', 39.6]);
+        client.free = 3;
+        await assert.rejects(m.open({ symbol: 'ABCUSDT', token: 'ABC' }), /insufficient/);
     });
 
     await test('manager: time stop closes after maxHoldMin', async () => {

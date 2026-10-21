@@ -2,6 +2,8 @@ const fs = require('fs');
 const path = require('path');
 
 const SELL_FAIL_ALERT_EVERY = 10;
+// Bybit spot minimum order value for most USDT pairs
+const MIN_ORDER_USDT = 5;
 
 /**
  * Bybit SPOT positions opened on Upbit KRW listings: SL on the last price (checked every pollMs,
@@ -40,7 +42,15 @@ class BybitSpotManager {
     /** Market buy `amount` USDT of symbol. Resolves with a trader-style result. */
     async open({ symbol, token, source = {} }) {
         const startedAt = this.now();
-        const fill = await this.client.marketBuy(symbol, this.settings.amount);
+        // Less USDT than configured in the wallet: spend all of it (user rule), keeping ~1% for the fee.
+        let usdt = this.settings.amount;
+        const free = await this.client.freeBalance('USDT').catch(() => null);
+        if (free != null && free * 0.99 < usdt) {
+            usdt = Math.floor(free * 0.99 * 100) / 100;
+            if (usdt < MIN_ORDER_USDT) throw new Error(`insufficient USDT on Bybit: ${free}`);
+            console.warn(`💸 [BYBIT-SPOT] ${symbol}: only ${free} USDT free < ${this.settings.amount} — buying with ${usdt}`);
+        }
+        const fill = await this.client.marketBuy(symbol, usdt);
         const state = {
             symbol,
             token,
