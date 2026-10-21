@@ -240,7 +240,7 @@ async function main() {
         });
     }
 
-    if (config.exchanges.bithumb.enabled) {
+    if (config.exchanges.bithumb.enabled && config.exchanges.bithumb.crawlerEnabled) {
         runMonitorLoop('BITHUMB', monitoring.bithumb, config.exchanges.bithumb.interval);
     }
 

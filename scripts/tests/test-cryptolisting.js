@@ -77,6 +77,15 @@ async function test(name, fn) {
         assert.strictEqual(await cl.toAnnouncement(msg({ title: 'Wallet maintenance', ticker: '', publisher: 'binance', listingType: 'not_listing' })), null);
     });
 
+    await test('Binance bStocks pairs are neither alerted nor traded (socket and REST)', async () => {
+        const title = 'Binance Exchange Adds RoboStrategy Inc (BOTB), Berkshire Hathaway (BRKBB), KraneShares STAR Market 50 ETF (KSTRB), Direxion Daily 20 Year Treasury Bull 3X ETF (TMFB) and Vistra Corp (VSTB) bStocks Trading Pairs on Binance Spot/Convert - 2026-10-21';
+        assert.strictEqual(await cl.toAnnouncement(msg({ title, ticker: 'BOTB,BRKBB,KSTRB,TMFB,VSTB', publisher: 'binance', listingType: 'spot_listing' })), null);
+        const binance = require('../../modules/monitoring/binance-monitor');
+        assert.strictEqual(await binance.processAnnouncement({ id: 1, code: 'x', title, releaseDate: Date.now(), catalogId: 48, url: '' }, 'test-bstocks'), null);
+        // a normal "Adds ... Trading Pairs" notice still goes through
+        assert.ok(await binance.processAnnouncement({ id: 2, code: 'y', title: 'Binance Will Add ABC (ABC) Trading Pairs', releaseDate: Date.now(), catalogId: 48, url: '' }, 'test-pairs'));
+    });
+
     await test('Upbit delist -> DELISTING via Upbit categorize', async () => {
         const a = await cl.toAnnouncement(msg({
             title: '고트세우스 막시무스(GOAT) 거래지원 종료 안내', ticker: 'GOAT',
