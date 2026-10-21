@@ -6,6 +6,10 @@ const monitoring = require('./modules/monitoring');
 const lightningTrader = require('./modules/automation/lightning-trader');
 const telegram = require('./modules/notifications');
 const http = require('http');
+const path = require('path');
+const { CrossSourceDedup } = require('./modules/monitoring/cross-source-dedup');
+
+const crossSourceDedup = new CrossSourceDedup(path.join(__dirname, config.storage.seenCrossSourceFile));
 
 //npx kill-port 3003 && node --require ./preload.js index-new.js
 
@@ -59,6 +63,7 @@ function startHealthServer() {
                 binance: monitoring.binance.getHealth(),
                 upbit: monitoring.upbit.getHealth(),
                 bithumb: monitoring.bithumb.getHealth(),
+                cryptolisting: monitoring.cryptolisting.getHealth(),
                 binancePriceStream: lightningTrader.binance.priceStream.getHealth()
             },
             positions: lightningTrader.positionManager ? lightningTrader.positionManager.getHealth() : { enabled: false },
@@ -104,7 +109,9 @@ function logAnnouncement(a) {
     const tokenText = a.tokens && a.tokens.length > 0 ? a.tokens.join(',') : 'N/A';
     let extra = '';
 
-    if (a.exchange === 'UPBIT') {
+    if (a._source === 'CRYPTOLISTING') {
+        extra = ` | source=CRYPTOLISTING | type=${a._listingType} | dispatch→recv=${a._dispatchToRecvMs}ms`;
+    } else if (a.exchange === 'UPBIT') {
         if (a._source === 'WS') {
             const wsTs = a._wsTimestamp ? formatTime(a._wsTimestamp) : 'N/A';
             extra = ` | source=WS | wsTimestamp=${wsTs}`;
@@ -153,6 +160,14 @@ async function executeTrade(a) {
 const ALERT_MAX_WAIT_MS = 3000;
 
 function handleAnnouncement(a) {
+    // Several sources deliver the same notice: only the first one is alerted and traded.
+    const source = a._source || 'REST';
+    const duplicate = crossSourceDedup.claim(a, source);
+    if (duplicate) {
+        console.log(`🔁 [${a.exchange}] ${source} duplicate, ${duplicate.source} was first by ${duplicate.agoMs}ms | ${a.title}`);
+        return;
+    }
+
     // The order goes out first (started synchronously, before any logging or Telegram work).
     // Fire-and-forget: awaiting it here would pause polling for the whole trade.
     let tradeDone = Promise.resolve();
@@ -226,13 +241,16 @@ async function main() {
     if (config.exchanges.bithumb.enabled) {
         runMonitorLoop('BITHUMB', monitoring.bithumb, config.exchanges.bithumb.interval);
     }
-    
+
+    monitoring.cryptolisting.start(handleAnnouncement, text => telegram.sendMessage(text, 'signal').catch(() => {}));
+
     console.log(`⚡ Bot running | Auto-trade: ${config.autoTrade.enabled ? 'ON' : 'OFF'} | Binance Futures: ${config.binanceFutures.mode} (${config.binanceFutures.testnetUrl && config.binanceFutures.useTestnet ? config.binanceFutures.testnetUrl : config.binanceFutures.productionUrl})`);
     
     // Handle graceful shutdown (SIGINT = Ctrl+C, SIGTERM = `docker stop` / orchestrators)
     const shutdown = async () => {
         monitoring.upbit.seenStore.flush();
         monitoring.bithumb.seenStore.flush();
+        crossSourceDedup.flush();
         await storage.saveAll();
         process.exit(0);
     };

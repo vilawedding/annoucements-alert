@@ -57,12 +57,55 @@ class LightningAutoTrader {
             }
         };
 
+        // Per-symbol max leverage, so an order never asks for more than the symbol allows.
+        const refreshLeverageBrackets = async () => {
+            try {
+                return await this.binance.loadLeverageBrackets();
+            } catch (error) {
+                console.error(`[WARMUP] leverage bracket preload failed: ${error.response?.data?.msg || error.message}`);
+                return 0;
+            }
+        };
+
         this.binance.priceStream.start();
 
-        const count = await refreshPrecisions();
-        console.log(`⚡ [WARMUP] Preloaded precision for ${count} Binance Futures symbols`);
+        const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
+        console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
+
+        // Isolated margin must be set before the position exists, so do every symbol up front
+        // (and again on each bracket refresh, which picks up new listings).
+        if (config.autoTrade.isolated) {
+            const isolate = async () => {
+                try {
+                    const { done, failed } = await this.binance.isolateAll();
+                    if (done || failed) console.log(`🧱 [MARGIN] ISOLATED set on ${done} symbols${failed ? `, ${failed} failed (open position/orders?)` : ''}`);
+                } catch (error) {
+                    console.error(`[MARGIN] isolate failed: ${error.message}`);
+                }
+            };
+            isolate();
+            setInterval(async () => { await refreshLeverageBrackets(); isolate(); }, PRECISION_REFRESH_MS);
+        }
+
+        // Max-leverage mode: set each symbol's leverage ahead so even its first order opens with it.
+        // Sized with the default margin; profiles with their own amount are corrected per order.
+        if (config.autoTrade.useSymbolMaxLeverage) {
+            const presetLeverage = async () => {
+                try {
+                    const { done, failed } = await this.binance.presetLeverageAll(
+                        (symbol) => this.cappedMaxLeverage(symbol, this.config.amount)
+                    );
+                    if (done || failed) console.log(`⚙️ [LEVERAGE] Pre-set max leverage on ${done} symbols${failed ? `, ${failed} failed` : ''}`);
+                } catch (error) {
+                    console.error(`[LEVERAGE] preset failed: ${error.message}`);
+                }
+            };
+            presetLeverage();
+            setInterval(async () => { await refreshLeverageBrackets(); presetLeverage(); }, PRECISION_REFRESH_MS);
+        }
 
         setInterval(refreshPrecisions, PRECISION_REFRESH_MS);
+        setInterval(refreshLeverageBrackets, PRECISION_REFRESH_MS);
         // Concurrent pings keep several sockets warm (order + parallel tokens + leverage).
         const keepWarm = () => {
             for (let i = 0; i < WARM_SOCKETS; i++) {
@@ -174,12 +217,46 @@ class LightningAutoTrader {
             leverage: p.leverage,
             amount: margin,
             notional: margin * p.leverage,
+            slPct: p.slPct,
+            tpPct: p.tpPct,
             risk: {
                 name: key,
                 initialSlRoiPct: p.slPct * p.leverage,
                 tpRoiPct: p.tpPct > 0 ? p.tpPct * p.leverage : 0,
                 trailing: null,
                 maxHoldMin: p.maxHoldMin
+            }
+        };
+    }
+
+    /**
+     * The profile with its leverage capped at the symbol's max for this notional (Binance rejects
+     * a higher one, and the position kept whatever leverage it had). Strategy SL/TP are price %, so
+     * their ROI is recomputed with the capped leverage. Unknown max (brackets not loaded) = as configured.
+     */
+    /** The symbol's max leverage for this margin, held under AUTO_TRADE_LEVERAGE_CAP (0 = no cap). */
+    cappedMaxLeverage(symbol, margin) {
+        const max = this.binance.getMaxLeverageForMargin(symbol, margin);
+        const cap = config.autoTrade.leverageCap;
+        return max && cap > 0 ? Math.min(max, cap) : max;
+    }
+
+    profileForSymbol(profile, symbol) {
+        const maxLeverage = this.cappedMaxLeverage(symbol, profile.amount);
+        if (!maxLeverage) return profile;
+        // LEVERAGE_USE_SYMBOL_MAX: always the symbol's max; otherwise only cap a too-high setting.
+        if (!config.autoTrade.useSymbolMaxLeverage && profile.leverage <= maxLeverage) return profile;
+        if (maxLeverage === profile.leverage) return profile;
+
+        console.log(`⚙️ [LEVERAGE] ${symbol} max ${maxLeverage}x (${profile.name} configured ${profile.leverage}x) — using ${maxLeverage}x`);
+        return {
+            ...profile,
+            leverage: maxLeverage,
+            notional: profile.amount * maxLeverage,
+            risk: profile.risk && {
+                ...profile.risk,
+                initialSlRoiPct: profile.slPct * maxLeverage,
+                tpRoiPct: profile.tpPct > 0 ? profile.tpPct * maxLeverage : 0
             }
         };
     }
@@ -259,7 +336,7 @@ class LightningAutoTrader {
                 : this.config.takeProfitPercentUpbit;
         
         const isShort = category === 'DELISTING' || category === 'WARNING';
-        const profile = this.strategyProfile(exchange, category);
+        const signalProfile = this.strategyProfile(exchange, category);
         const executionStartTime = Date.now();
         const tradeResults = [];
         const announcementHash = announcement.hash;
@@ -269,7 +346,8 @@ class LightningAutoTrader {
         await Promise.all(tokens.map(async (token) => {
             const symbol = `${token}USDT`;
             const tradeStartTime = Date.now();
-            
+            const profile = this.profileForSymbol(signalProfile, symbol);
+
             try {
                 if (this.fastModeSkipTradableCheck) {
                     const cachedTradable = this.binance.isSymbolTradableCached(symbol);
@@ -305,6 +383,13 @@ class LightningAutoTrader {
                 }
                 
                 const side = isShort ? 'SELL' : 'BUY';
+
+                // Normally already done at warmup; only a symbol newer than the last refresh waits here.
+                if (config.autoTrade.isolated) {
+                    await this.binance.ensureIsolated(symbol).catch((error) => {
+                        console.warn(`[MARGIN] ${symbol} isolate failed: ${error.response?.data?.msg || error.message}`);
+                    });
+                }
 
                 // Place order with TP/SL using fast retry
                 const tradeFn = this.positionManager

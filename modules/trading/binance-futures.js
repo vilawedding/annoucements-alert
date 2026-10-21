@@ -23,6 +23,12 @@ let serverTimeCache = { time: null, lastFetch: 0, offsetMs: 0 };
 let tradableSymbolsCache = { symbols: null, lastFetch: 0 };
 // symbol -> contract delivery time (ms); a perpetual that Binance is delisting carries a near date
 const deliveryTimes = new Map();
+// symbol -> leverage brackets [{ initialLeverage, notionalFloor, notionalCap }] ascending by notional
+const leverageBrackets = new Map();
+// symbols confirmed on ISOLATED margin this run
+const isolatedSymbols = new Set();
+// symbol -> leverage last pre-set this run
+const presetLeverages = new Map();
 let isServerTimeSyncing = false;
 
 function syncServerTimeInBackground() {
@@ -242,7 +248,106 @@ const account = {
     async changeInitialLeverage(symbol, leverage) {
         return await makeRequest('POST', '/fapi/v1/leverage', { symbol, leverage }, true);
     },
+
+    /**
+     * One signed call for every symbol's leverage brackets (this account's, so it reflects any
+     * per-account limits), cached so an order never waits on it. Returns the number of symbols.
+     */
+    async loadLeverageBrackets() {
+        const data = await makeRequest('GET', '/fapi/v1/leverageBracket', {}, true);
+        for (const entry of Array.isArray(data) ? data : []) {
+            const brackets = (entry?.brackets || [])
+                .map(b => ({
+                    initialLeverage: Number(b.initialLeverage),
+                    notionalFloor: Number(b.notionalFloor) || 0,
+                    notionalCap: Number(b.notionalCap) || Infinity
+                }))
+                .filter(b => b.initialLeverage > 0)
+                .sort((a, b) => a.notionalFloor - b.notionalFloor);
+            if (entry?.symbol && brackets.length) leverageBrackets.set(entry.symbol, brackets);
+        }
+        return leverageBrackets.size;
+    },
+
+    /**
+     * Max leverage Binance allows for a position of this notional on the symbol
+     * (null = brackets not loaded / unknown symbol, e.g. a listing newer than the last refresh).
+     */
+    getMaxLeverageCached(symbol, notional = 0) {
+        const brackets = leverageBrackets.get(symbol);
+        if (!brackets) return null;
+        const bracket = brackets.find(b => notional < b.notionalCap) || brackets[brackets.length - 1];
+        return bracket.initialLeverage;
+    },
     
+    /**
+     * Highest leverage L such that a position of margin x L still fits a bracket allowing L
+     * (sizing is margin x leverage, so the bracket depends on the leverage itself).
+     */
+    getMaxLeverageForMargin(symbol, margin) {
+        const brackets = leverageBrackets.get(symbol);
+        if (!brackets || !(margin > 0)) return null;
+        let best = 0;
+        for (const b of brackets) {
+            const byCap = Number.isFinite(b.notionalCap) ? Math.ceil(b.notionalCap / margin) - 1 : Infinity;
+            best = Math.max(best, Math.min(b.initialLeverage, byCap));
+        }
+        return best || null;
+    },
+
+    /** Put the symbol on ISOLATED margin once (remembered). -4046 = already isolated. */
+    async ensureIsolated(symbol) {
+        if (isolatedSymbols.has(symbol)) return;
+        try {
+            await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType: 'ISOLATED' }, true);
+        } catch (error) {
+            const code = error.response?.data?.code;
+            if (code !== -4046) throw error;
+        }
+        isolatedSymbols.add(symbol);
+    },
+
+    /** Isolate every USDT symbol (startup / refresh; skips ones already done). Returns { done, failed }. */
+    async isolateAll(concurrency = 8) {
+        const symbols = [...leverageBrackets.keys()].filter(s => s.endsWith('USDT') && !isolatedSymbols.has(s));
+        let done = 0;
+        let failed = 0;
+        let next = 0;
+        const worker = async () => {
+            while (next < symbols.length) {
+                const symbol = symbols[next++];
+                try { await account.ensureIsolated(symbol); done++; } catch { failed++; }
+            }
+        };
+        await Promise.all(Array.from({ length: concurrency }, worker));
+        return { done, failed };
+    },
+
+    /**
+     * Pre-set each USDT symbol's leverage so the first order already opens with it (the per-order
+     * change races the order). Symbols already at the wanted value this run are skipped.
+     */
+    async presetLeverageAll(leverageFor, concurrency = 8) {
+        const symbols = [...leverageBrackets.keys()].filter(s => s.endsWith('USDT'));
+        let done = 0;
+        let failed = 0;
+        let next = 0;
+        const worker = async () => {
+            while (next < symbols.length) {
+                const symbol = symbols[next++];
+                const leverage = leverageFor(symbol);
+                if (!leverage || presetLeverages.get(symbol) === leverage) continue;
+                try {
+                    await account.changeInitialLeverage(symbol, leverage);
+                    presetLeverages.set(symbol, leverage);
+                    done++;
+                } catch { failed++; }
+            }
+        };
+        await Promise.all(Array.from({ length: concurrency }, worker));
+        return { done, failed };
+    },
+
     async changeMarginType(symbol, marginType) {
         return await makeRequest('POST', '/fapi/v1/marginType', { symbol, marginType }, true);
     },
@@ -872,6 +977,12 @@ module.exports = {
     getDeliveryTimeCached: marketData.getDeliveryTimeCached.bind(marketData),
     getPositionInfo: account.getPositionInfo,
     changeInitialLeverage: account.changeInitialLeverage,
+    loadLeverageBrackets: account.loadLeverageBrackets,
+    getMaxLeverageCached: account.getMaxLeverageCached,
+    getMaxLeverageForMargin: account.getMaxLeverageForMargin,
+    ensureIsolated: account.ensureIsolated,
+    isolateAll: account.isolateAll,
+    presetLeverageAll: account.presetLeverageAll,
     getSymbolPrecision: utils.getSymbolPrecision,
     loadTradableSymbolPrecisions: marketData.loadTradableSymbolPrecisions.bind(marketData),
     testConnectivity: marketData.testConnectivity,

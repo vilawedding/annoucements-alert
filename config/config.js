@@ -177,7 +177,15 @@ module.exports = {
             cookie: process.env.BITHUMB_COOKIE || ''
         }
     },
-    
+
+    // cryptolisting.ws announcement socket: extra source for the enabled exchanges above, traded like
+    // their own feeds (first source wins). jp endpoint = Binance + Upbit + Bithumb.
+    cryptolisting: {
+        enabled: parseBooleanEnv(process.env.CRYPTOLISTING_ENABLED, false),
+        apiKey: process.env.CRYPTOLISTING_API_KEY || '',
+        wsUrl: process.env.CRYPTOLISTING_WS_URL || 'wss://jp.cryptolisting.ws'
+    },
+
     // Auto-Trading Configuration
     autoTrade: {
         // Never trade a signal published longer ago than this (seconds). Guards against old
@@ -200,6 +208,13 @@ module.exports = {
         binanceDelisting: process.env.AUTO_TRADE_BINANCE_DELISTING === 'true',
         amount: parseFloat(process.env.AUTO_TRADE_AMOUNT) || 10,
         leverage: parseInt(process.env.AUTO_TRADE_LEVERAGE) || 5,
+        // true = every order uses the symbol's own max leverage (all profiles); false = configured
+        // leverage, only capped down when the symbol allows less
+        // ISOLATED margin on every traded symbol (set before the order; false = leave the account's mode)
+        isolated: parseBooleanEnv(process.env.AUTO_TRADE_ISOLATED, true),
+        // Upper bound on any order's leverage (0 = none). Keeps SL inside the liquidation distance.
+        leverageCap: numEnv('AUTO_TRADE_LEVERAGE_CAP', 20),
+        useSymbolMaxLeverage: parseBooleanEnv(process.env.AUTO_TRADE_LEVERAGE_MAX, false),
         stopLossPercent: parseFloat(process.env.AUTO_TRADE_SL_PERCENT) || 1.0,
         takeProfitPercent: parseFloat(process.env.AUTO_TRADE_TP_PERCENT) || 200.0,
         takeProfitPercentUpbit:
@@ -302,6 +317,8 @@ module.exports = {
         // Persistent "already seen" notice keys (restart must not re-alert / re-trade old notices)
         seenUpbitFile: 'data/seen_upbit.json',
         seenBithumbFile: 'data/seen_bithumb.json',
+        // Notices already handled from any source (first source wins, see cross-source-dedup)
+        seenCrossSourceFile: 'data/seen_cross_source.json',
         binanceFile: 'data/sent_announcements_binance.json',
         upbitFile: 'data/sent_announcements_upbit.json',
         bithumbFile: 'data/sent_announcements_bithumb.json'
