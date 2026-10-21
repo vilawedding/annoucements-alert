@@ -148,7 +148,8 @@ class LightningAutoTrader {
         if (this.preparingMargin || !this.tradableSymbols) return;
         this.preparingMargin = true;
         const profiles = Object.values(config.strategies);
-        const leverage = Math.max(this.config.leverage, ...profiles.map(p => p.leverage));
+        // Spot-only profiles (Bybit) carry no leverage: Math.max with undefined would be NaN for every symbol.
+        const leverage = Math.max(this.config.leverage, ...profiles.map(p => p.leverage).filter(Number.isFinite));
         const amount = Math.max(this.config.amount, ...profiles.map(p => p.amount));
         let done = 0, failed = 0;
         try {
