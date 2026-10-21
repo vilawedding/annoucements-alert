@@ -164,6 +164,9 @@ module.exports = {
         },
         bithumb: {
             enabled: parseBooleanEnv(process.env.BITHUMB_ENABLED, false),
+            // false = Bithumb notices only from the cryptolisting.ws socket (the feed page is behind
+            // Cloudflare and answers 403 to the server IP)
+            crawlerEnabled: parseBooleanEnv(process.env.BITHUMB_CRAWLER_ENABLED, true),
             name: "Bithumb",
             emoji: "🟠",
             baseUrl: "https://www.bithumb.com",

@@ -10,6 +10,8 @@ const LIST_URL = 'https://www.binance.com/bapi/apex/v1/public/apex/cms/article/l
 // Delist notices the trader may short (see delistScope).
 const TRADED_DELIST_SCOPES = new Set(['SPOT', 'FUTURES']);
 const CACHE_KEY_VARIANTS = 1000;
+// Same wording as scripts/report/export-announcements.js (STOCKS)
+const TOKENIZED_STOCKS = /\bbstocks?\b|tokenized (securit|stock)|stock trading/i;
 
 const httpClient = axios.create({
     timeout: 5000,
@@ -277,6 +279,11 @@ class BinanceMonitor {
         
         const category = this.categorize(title, catalogId);
         if (!['LISTING', 'NEW_PAIRS', 'DELISTING'].includes(category)) {
+            return null;
+        }
+        // Tokenized stocks / ETFs ("... bStocks Trading Pairs on Binance Spot/Convert"): the tickers are
+        // stocks, not alts with a perp to trade; neither alerted nor traded.
+        if (TOKENIZED_STOCKS.test(title)) {
             return null;
         }
 
