@@ -250,7 +250,7 @@ class LightningAutoTrader {
      */
     strategyProfile(exchange, category) {
         let key = null;
-        if (exchange === 'UPBIT') key = category === 'WARNING' ? 'upbitWarning' : category === 'DELISTING' ? 'upbitDelisting' : null;
+        if (exchange === 'UPBIT') key = { WARNING: 'upbitWarning', DELISTING: 'upbitDelisting', LISTING_SHORT: 'upbitListingShort' }[category] || null;
         if (exchange === 'BINANCE' && category === 'LISTING') key = 'binanceListing';
         if (exchange === 'BINANCE' && category === 'DELISTING') key = 'binanceDelisting';
         if (!key) {
@@ -321,12 +321,33 @@ class LightningAutoTrader {
 
         // Upbit KRW listing tokens without a Binance perp go to Bybit SPOT; the rest stays on Binance.
         const spot = this._bybitSpotListing(announcement);
-        const [spotResults, binanceResults] = await Promise.all([
+        const [spotResults, binanceResults, shortResults] = await Promise.all([
             spot ? spot.results : null,
-            this._executeBinance(spot ? spot.rest : announcement)
+            this._executeBinance(spot ? spot.rest : announcement),
+            this._upbitListingShort(announcement)
         ]);
-        const all = [...(spotResults || []), ...(binanceResults || [])];
+        const all = [...(spotResults || []), ...(binanceResults || []), ...(shortResults || [])];
         return all.length > 0 ? all : null;
+    }
+
+    /**
+     * SHORT an Upbit listing that opens BTC/USDT markets only (no KRW) on the Binance perp, `delaySec`
+     * after the notice: the small pump fades (backtest 2026-10-21, 1s candles + funding, 58 listings
+     * 2023-2026: +160u at 10u x10, DD 19u, every year positive). KRW listings keep pumping: never shorted.
+     * The freshness check runs at the notice; the delayed order skips it (it is late on purpose).
+     */
+    async _upbitListingShort(announcement) {
+        if (!this.config.upbitListingShort) return null;
+        if (String(announcement.exchange).toUpperCase() !== 'UPBIT' || String(announcement.category).toUpperCase() !== 'LISTING') return null;
+        const title = announcement.title || '';
+        if (/KRW/.test(title) || !/BTC|USDT/.test(title)) return null;
+        if (!this._isFresh(announcement, false)) return null;
+
+        const delayMs = config.strategies.upbitListingShort.delaySec * 1000;
+        const waitMs = Math.max(0, Number(announcement.releaseDate) + delayMs - Date.now());
+        console.log(`⏳ [LISTING-SHORT] ${(announcement.tokens || []).join(',')}: short in ${Math.round(waitMs / 1000)}s — ${title}`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        return this._executeBinance({ ...announcement, category: 'LISTING_SHORT' }, { freshnessChecked: true });
     }
 
     _hasBinancePerp(token) {
@@ -405,11 +426,11 @@ class LightningAutoTrader {
         return true;
     }
 
-    async _executeBinance(announcement) {
+    async _executeBinance(announcement, { freshnessChecked = false } = {}) {
         const exchange = String(announcement.exchange || '').toUpperCase();
         const category = String(announcement.category || '').toUpperCase();
 
-        if (!this._isFresh(announcement)) return null;
+        if (!freshnessChecked && !this._isFresh(announcement)) return null;
 
         if (exchange === 'UPBIT') {
             if (category === 'LISTING') {
@@ -418,6 +439,8 @@ class LightningAutoTrader {
                     console.log(`⏭️ [TRADE] skip Upbit listing without KRW market (AUTO_TRADE_UPBIT_KRW_ONLY): ${announcement.title}`);
                     return null;
                 }
+            } else if (category === 'LISTING_SHORT') {
+                if (!this.config.upbitListingShort) return null;
             } else if (category === 'WARNING') {
                 if (!this.config.upbitWarning) return null;
             } else if (category === 'DELISTING') {
@@ -484,7 +507,7 @@ class LightningAutoTrader {
                 ? this.config.takeProfitPercentBithumb
                 : this.config.takeProfitPercentUpbit;
         
-        const isShort = category === 'DELISTING' || category === 'WARNING';
+        const isShort = category === 'DELISTING' || category === 'WARNING' || category === 'LISTING_SHORT';
         const signalProfile = this.strategyProfile(exchange, category);
         const executionStartTime = Date.now();
         const tradeResults = [];
@@ -598,6 +621,7 @@ class LightningAutoTrader {
                     token,
                     symbol,
                     success: true,
+                    side: isShort ? 'SHORT' : 'LONG',
                     orderId: filled.orderId,
                     avgPrice: filled.avgPrice,
                     executedQty: filled.executedQty || order.quantity,
