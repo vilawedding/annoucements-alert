@@ -24,6 +24,14 @@ const args = process.argv.slice(2);
 const argValue = (name, fallback) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : fallback; };
 const LAG_MIN = Number(argValue('--lag-min', 10));
 const LAG_MAX = Number(argValue('--lag-max', 20));
+// Per-signal lag override, e.g. --lag BINANCE_SPOT_DELIST=2.2-2.6 --lag BINANCE_FUTURES_DELIST=0.9-1.2
+// (seconds; detection lag measured per source differs by notice type). Others use --lag-min/--lag-max.
+const LAG_BY_SIGNAL = {};
+args.forEach((a, i) => {
+    if (a !== '--lag') return;
+    const m = String(args[i + 1] || '').match(/^([A-Z_]+)=([\d.]+)-([\d.]+)$/);
+    if (m) LAG_BY_SIGNAL[m[1]] = [Number(m[2]), Number(m[3])];
+});
 const RUNS = Number(argValue('--runs', 30));
 const SEED = Number(argValue('--seed', 1));
 // 1s = whole holding period on 1s perp candles built from aggTrades (falls back to 1m when no dump).
@@ -157,7 +165,8 @@ async function runOnce(events, seed, fundingCache, secondsCache) {
     const skipped = [];
     const openUntil = new Map(); // symbol -> exit time of the open position
     for (const ev of events) {
-        const lagMs = Math.round((LAG_MIN + random() * (LAG_MAX - LAG_MIN)) * 1000);
+        const [lagMin, lagMax] = LAG_BY_SIGNAL[ev.strategy] || [LAG_MIN, LAG_MAX];
+        const lagMs = Math.round((lagMin + random() * (lagMax - lagMin)) * 1000);
         let r = await bt.analyse(ev, lagMs);
         if (r.skip) { skipped.push({ ev, reason: r.skip }); continue; }
         const sec = secondsCache && secondsCache.get(eventKey(ev));
@@ -217,7 +226,8 @@ async function main() {
     const L = [];
     const w = (...s) => L.push(...s);
     const resLabel = RES === '1s' ? (WICK ? '1s candles, wick trigger' : '1s candles, close trigger') : '1m candles';
-    w(`# Live config backtest — lag random ${LAG_MIN}–${LAG_MAX}s per trade, ${resLabel}`, '');
+    const lagOverrides = Object.entries(LAG_BY_SIGNAL).map(([k, [a, b]]) => `${k} ${a}–${b}s`).join(', ');
+    w(`# Live config backtest — lag random ${LAG_MIN}–${LAG_MAX}s per trade${lagOverrides ? ` (${lagOverrides})` : ''}, ${resLabel}`, '');
     if (RES === '1s') {
         const on1s = main.trades.filter(t => t.r.res === '1s').length;
         w(`Price path: 1s perp candles from aggTrades for ${on1s}/${main.trades.length} trades (others 1m). ` +

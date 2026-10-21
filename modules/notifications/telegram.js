@@ -28,7 +28,7 @@ function formatTimeline(result, a) {
     const lines = [
         `Published: ${clock(published)}${a._source === 'CRYPTOLISTING' ? ' (cryptolisting detect)' : ''}`,
         `Detected:  ${rel(Number(a.detectedAt))} via ${a._source || 'REST'}`,
-        `Order sent: ${rel(result.orderSentAt)}`,
+        `Order sent: ${rel(result.orderSentAt)}${result.entryPlan ? ` — plan ${result.entryPlan}${result.entryPlan === 'A' ? ' (race)' : ' (after the bounce)'}` : ''}`,
         `Filled@Binance: ${rel(result.exchangeFillAt)}`
     ];
     if (result.orderSentAt && result.exchangeFillAt) lines.push(`Sent→fill: ${result.exchangeFillAt - result.orderSentAt}ms (incl. clock offset)`);

@@ -339,7 +339,14 @@ module.exports = {
             slPct: numEnv('BINANCE_DELISTING_SL_PCT', 10),
             tpPct: numEnv('BINANCE_DELISTING_TP_PCT', 0),
             maxHoldMin: numEnv('BINANCE_DELISTING_MAX_HOLD_MIN', 240),
-            trail: strategyTrail('BINANCE_DELISTING')
+            trail: strategyTrail('BINANCE_DELISTING'),
+            // USDⓈ-M futures delists crash the moment Binance pushes the notice (~0.9s after publish,
+            // 2023-2026 onsets 869-947ms), then bounce. Plan A: received before the crash -> short now
+            // (at the top). Plan B (late): wait until FUTURES_DELAY_SEC after the notice, past the bounce
+            // (backtest 1s: entry 5-8s +665u vs ~1s +490u, DD 118u vs 221u). 0 = always immediate.
+            futuresRaceMaxMs: numEnv('BINANCE_DELISTING_FUTURES_RACE_MAX_MS', 850),          // after Binance publish
+            futuresRaceAfterPushMs: numEnv('BINANCE_DELISTING_FUTURES_RACE_AFTER_PUSH_MS', 50), // cryptolisting time = push time
+            futuresDelaySec: numEnv('BINANCE_DELISTING_FUTURES_DELAY_SEC', 6)
         },
         // LONG on Bybit SPOT for Upbit KRW listings without a Binance perp (no leverage).
         // Backtest 1s, lag 5s: hold 5-15m with SL 5% ~ +10% median per trade, 65% win.

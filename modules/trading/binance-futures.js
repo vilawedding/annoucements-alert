@@ -36,17 +36,30 @@ function syncServerTimeInBackground() {
     if (isServerTimeSyncing) return;
     isServerTimeSyncing = true;
 
+    const startedAt = Date.now();
     marketData.getServerTime()
         .then((serverTime) => {
-            const now = Date.now();
+            // Binance stamps serverTime mid-request: align it with the middle of the round trip, not its
+            // end (that biased the offset by one way, ~46ms from Hanoi).
+            const endedAt = Date.now();
+            const rtt = endedAt - startedAt;
+            // A slow sample (cold TLS handshake, congestion) is asymmetric: keep the offset of fast ones.
+            const accurate = !(serverTimeCache.bestRttMs >= 0) || rtt <= serverTimeCache.bestRttMs * 1.5 + 5;
+            serverTimeCache.bestRttMs = Math.min(serverTimeCache.bestRttMs ?? Infinity, rtt);
+            const mid = Math.round((startedAt + endedAt) / 2);
             serverTimeCache.time = serverTime;
-            serverTimeCache.lastFetch = now;
-            serverTimeCache.offsetMs = serverTime - now;
+            serverTimeCache.lastFetch = mid;
+            if (accurate || !serverTimeCache.offsetMs) serverTimeCache.offsetMs = serverTime - mid;
         })
         .catch(() => {})
         .finally(() => {
             isServerTimeSyncing = false;
         });
+}
+
+/** Current time on Binance's clock (local clock + measured offset); local time until the first sync. */
+function binanceNow() {
+    return Date.now() + (serverTimeCache.offsetMs || 0);
 }
 
 // Keep-alive client for lower latency on repeated requests
@@ -1014,6 +1027,8 @@ module.exports = {
     getMaxLeverageForMargin: account.getMaxLeverageForMargin,
     ensureIsolated: account.ensureIsolated,
     loadSymbolConfig: account.loadSymbolConfig,
+    binanceNow,
+    syncServerTime: syncServerTimeInBackground,
     getLeverageCached: account.getLeverageCached,
     isIsolatedCached: account.isIsolatedCached,
     getSymbolPrecision: utils.getSymbolPrecision,

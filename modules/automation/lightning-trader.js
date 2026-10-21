@@ -102,6 +102,10 @@ class LightningAutoTrader {
         const [count, bracketCount] = await Promise.all([refreshPrecisions(), refreshLeverageBrackets()]);
         console.log(`⚡ [WARMUP] Preloaded precision for ${count} and leverage brackets for ${bracketCount} Binance Futures symbols`);
 
+        // First sample pays the TLS handshake (skewed): a few warm samples settle the clock offset.
+        this.binance.syncServerTime();
+        [2000, 4000, 6000].forEach(ms => setTimeout(() => this.binance.syncServerTime(), ms).unref());
+        setInterval(() => this.binance.syncServerTime(), 60000).unref();
         await this.refreshBalance();
         console.log(`💰 [WARMUP] Futures available: ${this.availableUsdt ?? 'unknown'} USDT`);
         setInterval(() => this.refreshBalance(), BALANCE_REFRESH_MS).unref();
@@ -342,6 +346,8 @@ class LightningAutoTrader {
         if (!this.config.enabled) return null;
         if (!announcement) return null;
 
+        if (this._isBinanceFuturesDelist(announcement)) return this._binanceFuturesDelist(announcement);
+
         // Upbit KRW listing tokens without a Binance perp go to Bybit SPOT; the rest stays on Binance.
         const spot = this._bybitSpotListing(announcement);
         const [spotResults, binanceResults, shortResults] = await Promise.all([
@@ -351,6 +357,37 @@ class LightningAutoTrader {
         ]);
         const all = [...(spotResults || []), ...(binanceResults || []), ...(shortResults || [])];
         return all.length > 0 ? all : null;
+    }
+
+    _isBinanceFuturesDelist(a) {
+        return String(a.exchange).toUpperCase() === 'BINANCE' && String(a.category).toUpperCase() === 'DELISTING'
+            && a.delistScope === 'FUTURES' && config.strategies.binanceDelisting.futuresDelaySec > 0;
+    }
+
+    /**
+     * Binance USDⓈ-M futures delist: plan A (race) when the notice arrived before the usual crash
+     * onset, else plan B (wait for the bounce). Decided once, on arrival; the ms are logged.
+     *  - official sources (REST / WebSocket): releaseDate = Binance's publish time -> elapsed <= futuresRaceMaxMs
+     *  - cryptolisting: releaseDate = its detection, i.e. the push the market reacts to -> elapsed <= futuresRaceAfterPushMs
+     */
+    async _binanceFuturesDelist(announcement) {
+        if (!this._isFresh(announcement)) return null;
+        const p = config.strategies.binanceDelisting;
+        const viaPush = announcement._source === 'CRYPTOLISTING';
+        // Binance's publish time is on Binance's clock: compare on it (this machine's clock was ~99ms
+        // behind on 2026-10-22, enough to flip a 850ms decision). cryptolisting stamps on its own clock.
+        const now = viaPush ? Date.now() : this.binance.binanceNow();
+        const elapsed = now - Number(announcement.releaseDate);
+        const limit = viaPush ? p.futuresRaceAfterPushMs : p.futuresRaceMaxMs;
+        const tokens = (announcement.tokens || []).join(',');
+        if (elapsed <= limit) {
+            console.log(`⚡ [FUT-DELIST] PLAN A race ${tokens}: +${elapsed}ms after ${viaPush ? 'push' : 'publish'} (<= ${limit}ms) -> short now`);
+            return this._executeBinance({ ...announcement, _entryPlan: 'A' }, { freshnessChecked: true });
+        }
+        const waitMs = Math.max(0, Number(announcement.releaseDate) + p.futuresDelaySec * 1000 - now);
+        console.log(`⏳ [FUT-DELIST] PLAN B ${tokens}: +${elapsed}ms after ${viaPush ? 'push' : 'publish'} (> ${limit}ms, crash likely done) -> short in ${waitMs}ms`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        return this._executeBinance({ ...announcement, _entryPlan: 'B' }, { freshnessChecked: true });
     }
 
     /**
@@ -702,6 +739,7 @@ class LightningAutoTrader {
                     symbol,
                     success: true,
                     side: isShort ? 'SHORT' : 'LONG',
+                    entryPlan: announcement._entryPlan || null,
                     // Timeline (ms): order request sent (local clock), fill time stamped by Binance
                     orderSentAt,
                     exchangeFillAt: Number(filled.updateTime || filled.transactTime) || null,

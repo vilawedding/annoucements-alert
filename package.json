@@ -20,7 +20,9 @@
     "test:bybit-spot": "node --require ./preload.js scripts/tests/test-bybit-spot.js",
     "check:bybit-spot": "node scripts/tests/check-bybit-spot.js",
     "check:binance-ws": "node scripts/tests/check-binance-announce-ws.js",
-    "report:latency": "node scripts/report/source-latency-report.js"
+    "report:latency": "node scripts/report/source-latency-report.js",
+    "probe:binance": "node scripts/tests/probe-binance-latency.js",
+    "test:futures-delist": "node --require ./preload.js scripts/tests/test-futures-delist-plan.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
