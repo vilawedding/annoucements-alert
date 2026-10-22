@@ -58,7 +58,7 @@ async function listen(hours) {
     setInterval(() => syncClock().catch(() => {}), 60000).unref();
 
     const connect = () => {
-        const query = `random=${crypto.randomBytes(16).toString('hex')}&topic=com_announcement_en&recvWindow=30000&timestamp=${Date.now()}`;
+        const query = `random=${crypto.randomBytes(16).toString('hex')}&topic=com_announcement_en&recvWindow=30000&timestamp=${Date.now() + offsetMs}`;
         const sig = crypto.createHmac('sha256', secret).update(query).digest('hex');
         const ws = new WebSocket(`wss://api.binance.com/sapi/wss?${query}&signature=${sig}`, { headers: { 'X-MBX-APIKEY': apiKey }, perMessageDeflate: false });
         const ping = setInterval(() => ws.readyState === WebSocket.OPEN && ws.ping(), 25000);
