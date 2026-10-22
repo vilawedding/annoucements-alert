@@ -15,6 +15,12 @@ const REQUEST_HEADERS = {
     'Expires': '0'
 };
 
+// Built once at load (runs before the order): the first timeZone format loads ICU data (95ms on the VPS).
+// Same output as toLocaleString('en-US', { timeZone: 'Asia/Seoul', hour12: false }).
+const KST_DATE_TIME = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul', hour12: false,
+    year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+});
 const WS_PING_INTERVAL_MS = 30000;
 const WS_RECONNECT_MIN_MS = 1000;
 const WS_RECONNECT_MAX_MS = 30000;
@@ -443,10 +449,7 @@ class UpbitMonitor {
         // 17:06:46, listed_at 18:23:09) and must not make an old notice look fresh.
         const publishedAt = article.first_listed_at || listed_at;
         const releaseDate = typeof publishedAt === 'number' ? publishedAt : new Date(publishedAt).getTime();
-        const formattedDate = new Date(publishedAt).toLocaleString('en-US', {
-            timeZone: 'Asia/Seoul',
-            hour12: false
-        }) + ' (KST)';
+        const formattedDate = KST_DATE_TIME.format(new Date(publishedAt)) + ' (KST)';
 
         // Prepare metadata for storage with millisecond precision
         const detectionTime = Date.now();

@@ -402,11 +402,9 @@ class BinanceMonitor {
             return null;
         }
         
-        const formattedDate = new Date(releaseDate).toLocaleString('vi-VN', {
-            timeZone: 'Asia/Ho_Chi_Minh',
-            hour12: false
-        });
-        
+        // No display date here: this runs before the order, and the first toLocaleString with a timeZone
+        // loads ICU data (95ms on the VPS). telegram.js formats releaseDate when it builds the alert.
+
         // Prepare metadata for storage with millisecond precision
         const detectionTime = Date.now();
         const primaryToken = validTokens.length > 0 ? validTokens[0] : null;
@@ -439,7 +437,6 @@ class BinanceMonitor {
             releaseDate,
             tokens: validTokens,
             signals,
-            formattedDate,
             metadata,
             detectedAt: detectionTime,
             // Candidates only; the trader decides per AUTO_TRADE_BINANCE_* flags

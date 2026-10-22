@@ -12,6 +12,13 @@ function formatPrice(value) {
     return String(Number(n.toPrecision(8)));
 }
 
+// Built once at load: the first timeZone format loads ICU data (95ms on the VPS), and a toLocaleString
+// call builds a new formatter every time. Same output as toLocaleString('vi-VN', { timeZone, hour12: false }).
+const VN_DATE_TIME = new Intl.DateTimeFormat('vi-VN', {
+    timeZone: 'Asia/Ho_Chi_Minh', hour12: false,
+    year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+});
+
 /** HH:MM:SS.mmm in GMT+7 */
 function clock(ms) {
     return new Date(ms + 7 * 3600e3).toISOString().slice(11, 23);
@@ -79,7 +86,7 @@ class TelegramService {
         const { exchange, category, url, tokens = [] } = announcement;
         const title = escapeHtml(announcement.title);
         const formattedDate = announcement.formattedDate
-            || new Date(announcement.releaseDate || announcement.detectedAt || Date.now()).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
+            || VN_DATE_TIME.format(new Date(announcement.releaseDate || announcement.detectedAt || Date.now()));
         
         const exchangeConfig = config.exchanges[exchange.toLowerCase()] || { emoji: '📢', name: exchange };
         const emoji = exchangeConfig.emoji;
