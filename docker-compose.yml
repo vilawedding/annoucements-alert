@@ -48,14 +48,30 @@ services:
         max-size: "5m"
         max-file: "3"
 
-  # Upbit warning / delisting / new market transitions from the public quotation feeds
-  # -> data/upbit_market_events.jsonl
+  # Upbit / Bithumb warning / delisting / new market transitions from the public quotation feeds
+  # -> data/<exchange>_market_events.jsonl
   upbit-market-listener:
     image: announcement-bot:latest
     container_name: upbit-market-listener
     restart: unless-stopped
     init: true
-    command: ["node", "scripts/tests/listen-upbit-market.js", "0"]
+    command: ["node", "scripts/tests/listen-kr-market.js", "upbit", "0"]
+    healthcheck:
+      disable: true
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  bithumb-market-listener:
+    image: announcement-bot:latest
+    container_name: bithumb-market-listener
+    restart: unless-stopped
+    init: true
+    command: ["node", "scripts/tests/listen-kr-market.js", "bithumb", "0"]
     healthcheck:
       disable: true
     volumes:
