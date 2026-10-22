@@ -400,6 +400,18 @@ test('binance: delistScope separates spot / futures from margin and other delist
     for (const [title, scope] of cases) assert.strictEqual(binance.delistScope(title), scope, title);
 });
 
+test('binance: listingScope keeps spot listings only, same split as the backtest export', () => {
+    const cases = [
+        ['Binance Will List Celestia (TIA) with Seed Tag Applied', 'SPOT'],
+        ['Binance Will List Rocket Pool (RPL) in the Innovation Zone', 'SPOT'],
+        ['Binance Futures Will Launch USDⓈ-M FET Perpetual Contracts with Up to 20X Leverage', 'FUTURES'],
+        ['Introducing Banana Gun (BANANA) on Binance HODLer Airdrops! Subscribe your BNB to Simple Earn', 'OTHER'],
+        ['Binance Will End the Scroll (SCR) Pre-Market and List Scroll (SCR) with Seed Tag Applied', 'OTHER'],
+        ['Balance (EPT) Will Be Available on Binance Alpha and Binance Futures', 'OTHER']
+    ];
+    for (const [title, scope] of cases) assert.strictEqual(binance.listingScope(title), scope, title);
+});
+
 test('binance: futures delist keeps the multiplier prefix and skips COIN-M contracts', () => {
     const line = '2026-10-05 09:00 (UTC): USDⓈ-M PROMPTUSDT, PUMPBTCUSDT and 1000000BOBUSDT Perpetual Contracts';
     assert.deepStrictEqual(binance.filterValidTokens(binance.extractPerpTokens(line)), ['PROMPT', 'PUMPBTC', '1000000BOB']);
@@ -538,6 +550,36 @@ test('trader shorts Binance spot/futures delists only, never margin / unknown sc
         trader.fastModeSkipTradableCheck = real.skip;
         config.autoTrade.enabled = real.enabled;
         config.autoTrade.binanceDelisting = real.delisting;
+    }
+});
+
+test('trader longs Binance spot listings only, never futures launches / unknown scope', async () => {
+    const trader = require('../../modules/automation/lightning-trader');
+    const real = { enabled: config.autoTrade.enabled, listing: config.autoTrade.binanceListing, pm: trader.positionManager, entry: trader.binance.trading.marketEntry, skip: trader.fastModeSkipTradableCheck, isolated: trader.binance.isIsolatedCached, getLev: trader.binance.getLeverageCached };
+    config.autoTrade.enabled = true;
+    config.autoTrade.binanceListing = true;
+    trader.positionManager = { positions: new Map() };
+    trader.binance.isIsolatedCached = () => true;
+    trader.binance.getLeverageCached = () => config.strategies.binanceListing.leverage; // no leverage call
+    trader.fastModeSkipTradableCheck = true;
+    const ordered = [];
+    trader.binance.trading.marketEntry = async (symbol, side) => { ordered.push([symbol, side]); throw new Error('stop'); };
+    try {
+        const base = { exchange: 'BINANCE', category: 'LISTING', releaseDate: Date.now() };
+        assert.strictEqual(await trader.executeLight({ ...base, listingScope: 'FUTURES', title: 'Binance Futures Will Launch USDⓈ-M FET Perpetual Contracts', tokens: ['FET'] }), null);
+        assert.strictEqual(await trader.executeLight({ ...base, title: 'no scope (old monitor)', tokens: ['FET'] }), null);
+        assert.deepStrictEqual(ordered, [], 'no order for futures launches / unknown listings');
+
+        await trader.executeLight({ ...base, listingScope: 'SPOT', title: 'Binance Will List Celestia (TIA) with Seed Tag Applied', tokens: ['TIA'] }).catch(() => {});
+        assert.deepStrictEqual(ordered, [['TIAUSDT', 'BUY']]);
+    } finally {
+        trader.binance.trading.marketEntry = real.entry;
+        trader.binance.isIsolatedCached = real.isolated;
+        trader.binance.getLeverageCached = real.getLev;
+        trader.positionManager = real.pm;
+        trader.fastModeSkipTradableCheck = real.skip;
+        config.autoTrade.enabled = real.enabled;
+        config.autoTrade.binanceListing = real.listing;
     }
 });
 

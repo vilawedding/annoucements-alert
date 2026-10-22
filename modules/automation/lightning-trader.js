@@ -575,6 +575,11 @@ class LightningAutoTrader {
                 }
             } else if (category === 'LISTING') {
                 if (!this.config.binanceListing) return null;
+                // Futures launches / HODLer / Alpha / Pre-Market listings had no edge left in 2026.
+                if (announcement.listingScope !== 'SPOT') {
+                    console.log(`⏭️ [TRADE] skip Binance listing (scope ${announcement.listingScope || 'unknown'}, only SPOT is longed): ${announcement.title}`);
+                    return null;
+                }
             } else if (category === 'NEW_PAIRS') {
                 if (!this.config.binanceNewPairs) return null;
             } else {

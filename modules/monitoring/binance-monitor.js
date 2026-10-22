@@ -122,6 +122,23 @@ class BinanceMonitor {
     }
 
     /**
+     * Which market a LISTING notice is about, in the same order as the backtest export's binanceType().
+     * Only SPOT ("Binance Will List X (X)", Seed Tag or not) is longed on the perp (2023-2026, 1s candles,
+     * x10 SL 5% 60m: +636u over 35 trades); USDⓈ-M launches stopped moving the price in 2026 (Bybit perp,
+     * n=26) and HODLer airdrops / Alpha / Pre-Market / launchpool notices are alert-only.
+     */
+    listingScope(title) {
+        const t = String(title || '');
+        if (/hodler airdrops?|launchpool|megadrop|launchpad/i.test(t)) return 'OTHER';
+        if (/alpha/i.test(t) && !/will list/i.test(t)) return 'OTHER';
+        if (/bstocks|tokenized securit|stock trading/i.test(t)) return 'OTHER';
+        if (/^binance futures will (launch|list)|perpetual contract|delivery contract/i.test(t)) return 'FUTURES';
+        if (/pre-market/i.test(t)) return 'OTHER';
+        if (/\bwill list\b/i.test(t)) return 'SPOT';
+        return 'OTHER';
+    }
+
+    /**
      * USDⓈ-M perp tokens from "2026-10-05 09:00 (UTC): USDⓈ-M PROMPTUSDT, PUMPBTCUSDT and
      * 1000000BOBUSDT Perpetual Contracts". The contract name is kept whole (1000000BOB, so the
      * order goes to 1000000BOBUSDT, not BOBUSDT); COIN-M contracts (APTUSD) are not USDT and are skipped.
@@ -353,6 +370,7 @@ class BinanceMonitor {
         }
 
         const delistScope = category === 'DELISTING' ? this.delistScope(title) : null;
+        const listingScope = category === 'LISTING' ? this.listingScope(title) : null;
         // Perp notices name contracts (1000000BOBUSDT): the generic extractor would cut the multiplier.
         const tokens = delistScope === 'FUTURES' ? this.extractPerpTokens(title) : this.extractTokens(title);
         // The announcement WebSocket pushes the full body: read the tokens from it, no page fetch.
@@ -413,6 +431,7 @@ class BinanceMonitor {
             catalogId,
             category,
             delistScope,
+            listingScope,
             title,
             url,
             symbol,
