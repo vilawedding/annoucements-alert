@@ -29,7 +29,7 @@ services:
         max-file: "5"
 
   # Latency recorders, separate from the bot so a bot restart / deploy does not stop them.
-  # Each run exits after 24h and is restarted (one connection per day, logs rotate).
+  # Run until stopped (0 hours); the sockets reconnect by themselves, restart only covers a crash.
   # Binance: every official announcement push -> data/binance_ws_announcements.jsonl
   binance-ws-listener:
     image: announcement-bot:latest
@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
     init: true
     env_file: .env
-    command: ["node", "scripts/tests/listen-binance-announcements.js", "24"]
+    command: ["node", "scripts/tests/listen-binance-announcements.js", "0"]
     healthcheck:
       disable: true # the image's check targets the bot's HTTP port
     volumes:
@@ -55,7 +55,7 @@ services:
     container_name: upbit-market-listener
     restart: unless-stopped
     init: true
-    command: ["node", "scripts/tests/listen-upbit-market.js", "24"]
+    command: ["node", "scripts/tests/listen-upbit-market.js", "0"]
     healthcheck:
       disable: true
     volumes:

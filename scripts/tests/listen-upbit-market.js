@@ -6,7 +6,7 @@
 // Two feeds: the ticker WebSocket (pushed, but only when the market trades) and GET /v1/market/all?is_details=true
 // every POLL_MS (10 req/s allowed per IP). Every transition goes to data/upbit_market_events.jsonl with the
 // local time and the feed that saw it first, to measure the lag against the notice's publish time.
-// Run: node scripts/tests/listen-upbit-market.js [hours=24]
+// Run: node scripts/tests/listen-upbit-market.js [hours=24, 0 = forever]
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -132,8 +132,8 @@ function connect() {
     await poll(); // baseline before the WS, so existing flags are not reported as changes
     connect();
     setInterval(poll, POLL_MS);
-    console.log(`listening ${HOURS}h -> ${FILE}`);
+    console.log(`listening ${HOURS ? `${HOURS}h` : 'until stopped'} -> ${FILE}`);
     // setTimeout caps at ~24.8 days: check the end once a minute instead.
     const endAt = Date.now() + HOURS * 3600e3;
-    setInterval(() => { if (Date.now() >= endAt) { console.log('done'); process.exit(0); } }, 60000);
+    if (HOURS > 0) setInterval(() => { if (Date.now() >= endAt) { console.log('done'); process.exit(0); } }, 60000);
 })();

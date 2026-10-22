@@ -2,7 +2,7 @@
 // per notice, when it arrived vs Binance's publish time, on Binance's clock (offset re-measured every minute
 // from the fastest /fapi/v1/time samples). Lines go to data/binance_ws_announcements.jsonl.
 // Afterwards `--compare` matches them with cryptolisting.ws's public feed (its detection time per notice).
-// Run: npm run listen:binance-ws -- [hours=6]      npm run listen:binance-ws -- --compare
+// Run: npm run listen:binance-ws -- [hours=6, 0 = forever]      npm run listen:binance-ws -- --compare
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
@@ -54,7 +54,7 @@ async function listen(hours) {
     if (!apiKey || !secret) throw new Error('BINANCE_ANNOUNCE_API_KEY / _SECRET not set');
     fs.mkdirSync(path.dirname(FILE), { recursive: true });
     const s = await syncClock();
-    console.log(`clock: Binance - local = ${offsetMs}ms (rtt ${s.rtt}ms). Listening ${hours}h -> ${FILE}`);
+    console.log(`clock: Binance - local = ${offsetMs}ms (rtt ${s.rtt}ms). Listening ${hours ? `${hours}h` : 'until stopped'} -> ${FILE}`);
     setInterval(() => syncClock().catch(() => {}), 60000).unref();
 
     const connect = () => {
@@ -82,8 +82,9 @@ async function listen(hours) {
         ws.on('error', e => console.log('error', e.message));
     };
     connect();
-    setTimeout(() => { console.log('done'); process.exit(0); }, hours * 3600e3);
+    // The socket is reconnected on every close (Binance drops it after 24h), so it can run forever.
+    if (hours > 0) setTimeout(() => { console.log('done'); process.exit(0); }, hours * 3600e3);
 }
 
 if (process.argv.includes('--compare')) compare().catch(e => { console.error(e); process.exit(1); });
-else listen(Number(process.argv[2]) || 6).catch(e => { console.error('❌', e.message); process.exit(1); });
+else listen(process.argv[2] === undefined ? 6 : Number(process.argv[2])).catch(e => { console.error('❌', e.message); process.exit(1); });
