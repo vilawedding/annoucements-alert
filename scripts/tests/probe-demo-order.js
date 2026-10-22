@@ -52,7 +52,7 @@ function rest(method, path, params = {}, signed = false) {
 (async () => {
     const t = Date.now();
     const { serverTime } = await rest('GET', '/fapi/v1/time');
-    offset = serverTime - (t + (Date.now() - t) / 2);
+    offset = Math.round(serverTime - (t + (Date.now() - t) / 2)); // Binance rejects a fractional timestamp
 
     const [info, mark, dual] = await Promise.all([
         rest('GET', '/fapi/v1/exchangeInfo'),
