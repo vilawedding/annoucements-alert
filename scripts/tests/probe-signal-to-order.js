@@ -35,7 +35,32 @@ const wrap = (obj, name, before, after) => {
 };
 wrap(b, 'changeInitialLeverage', () => { T.levStart = hr(); }, () => { T.levEnd = hr(); });
 wrap(b.trading, 'marketEntry', () => { T.entryCall = hr(); }, r => { T.entryDone = hr(); T.fillAt = Number((r.order || r).updateTime) || null; T.entry = r.entryPrice; T.qty = r.quantity; });
-wrap(b.trading, 'placeOrder', p => { if (p.type === 'MARKET' && !T.sendAt) { T.send = hr(); T.sendAt = b.binanceNow(); } }, () => { if (!T.ack) T.ack = hr(); });
+wrap(b.trading, 'placeOrder', p => { if (p.type === 'MARKET' && !T.sendAt) { T.send = hr(); T.sendAt = b.binanceNow(); T.sendLocal = Date.now(); } }, r => { if (!T.ack) { T.ack = hr(); T.orderId = r && r.orderId; } });
+
+// Signed REST on the DEMO host, to read back what the matching engine recorded for each entry order.
+const crypto = require('crypto');
+const https = require('https');
+const DEMO = new URL(config.binanceFutures.testnetUrl).host;
+const demoGet = (p, params = {}, signed = false) => new Promise((resolve, reject) => {
+    let q = new URLSearchParams(params).toString();
+    if (signed) {
+        q += `${q ? '&' : ''}timestamp=${Date.now() + demoOffset}&recvWindow=10000`;
+        q += `&signature=${crypto.createHmac('sha256', config.binanceFutures.apiSecret).update(q).digest('hex')}`;
+    }
+    https.get({ host: DEMO, path: `${p}?${q}`, headers: { 'X-MBX-APIKEY': config.binanceFutures.apiKey } }, res => {
+        let body = ''; res.on('data', c => { body += c; }); res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+    }).on('error', reject);
+});
+let demoOffset = 0;
+async function measureDemoOffset() {
+    let best = null;
+    for (let i = 0; i < 10; i++) {
+        const t0 = Date.now(); const { serverTime } = await demoGet('/fapi/v1/time'); const t1 = Date.now();
+        if (!best || t1 - t0 < best.rtt) best = { rtt: t1 - t0, offset: serverTime - (t0 + t1) / 2 };
+    }
+    demoOffset = Math.round(best.offset);
+    return best;
+}
 wrap(pm, 'open', () => { T.pmStart = hr(); }, r => { T.pmEnd = hr(); T.sl = r && r.slPrice; T.slId = r && r.slAlgoId; });
 
 (async () => {
@@ -75,6 +100,7 @@ wrap(pm, 'open', () => { T.pmStart = hr(); }, r => { T.pmEnd = hr(); T.sl = r &&
             priceToSend: d('entryCall', 'send'), frameToSend: d('frame', 'send'), sendToAck: d('send', 'ack'),
             sendToFillBinance: T.fillAt ? (T.fillAt - T.sendAt) : '-', ackToEntryPrice: d('ack', 'entryDone'), slPlace: d('pmStart', 'pmEnd'), total: d('frame', 'done')
         };
+        row.orderId = T.orderId; row.sendLocal = T.sendLocal;
         rows.push(row);
         log(`round ${i}: ${JSON.stringify(row)} entry=${T.entry} sl=${T.sl}`);
         // cleanup: close the position and cancel its protective orders
@@ -86,6 +112,19 @@ wrap(pm, 'open', () => { T.pmStart = hr(); }, r => { T.pmEnd = hr(); T.sl = r &&
         } finally { console.log = log; console.warn = warn; }
         pm.positions.delete(SYMBOL);
         await new Promise(r => setTimeout(r, 1500));
+    }
+    // What the engine recorded: order creation time, fill trades (time, price, qty) vs the local send
+    // time moved onto the DEMO server's clock (offset from the fastest of 10 /fapi/v1/time samples).
+    const off = await measureDemoOffset();
+    log(`\ndemo server clock - local = ${demoOffset}ms (rtt ${off.rtt}ms) | binanceNow offset used above = ${b.binanceNow() - Date.now()}ms`);
+    for (const r of rows) {
+        if (!r.orderId) continue;
+        const o = await demoGet('/fapi/v1/order', { symbol: SYMBOL, orderId: r.orderId }, true);
+        const fills = await demoGet('/fapi/v1/userTrades', { symbol: SYMBOL, orderId: r.orderId }, true);
+        const sendOnDemo = r.sendLocal + demoOffset;
+        const qty = fills.reduce((s, f) => s + Number(f.qty), 0);
+        const vwap = fills.reduce((s, f) => s + Number(f.qty) * Number(f.price), 0) / (qty || 1);
+        log(`order ${r.orderId}: status ${o.status} | created +${o.time - sendOnDemo}ms after send | fills ${fills.length} at ${fills.map(f => `+${f.time - sendOnDemo}ms ${f.price}x${f.qty}${f.maker ? ' maker' : ''}`).join(', ')} | qty ${qty} vwap ${vwap.toFixed(6)} | frame->send ${r.frameToSend}ms`);
     }
     const pos = (await b.account.getPositionInfo(SYMBOL)).find(p => p.symbol === SYMBOL);
     log(`cleanup check: ${SYMBOL} positionAmt=${pos ? pos.positionAmt : 'n/a'}`);
