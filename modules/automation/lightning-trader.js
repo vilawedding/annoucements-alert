@@ -143,19 +143,39 @@ class LightningAutoTrader {
     }
 
     /**
+     * Profile whose leverage is preset on every symbol: the first ENABLED one in order of how much the
+     * first ms matter. Binance spot listing comes first (2026: +137u entering at +10ms vs +88u at +20ms),
+     * so its order never waits on a leverage call (~6-8ms on the VPS). Delists move over seconds (or wait
+     * 6s on purpose) and set their own leverage on the order path. Futures profiles only: a spot profile
+     * (Bybit) has no leverage and made the preset NaN (MITOUSDT 2026-10-21 kept 50x).
+     */
+    presetProfile() {
+        const defaults = { name: 'default', leverage: this.config.leverage, amount: this.config.amount };
+        // null = the default listing profile (Upbit / Bithumb listing LONG, AUTO_TRADE_LEVERAGE)
+        const byUrgency = [
+            ['binanceListing', this.config.binanceListing],
+            [null, this.config.upbitListing || this.config.bithumbListing],
+            ['upbitWarning', this.config.upbitWarning],
+            ['upbitDelisting', this.config.upbitDelisting],
+            ['binanceDelisting', this.config.binanceDelisting],
+            ['upbitListingShort', this.config.upbitListingShort]
+        ];
+        const hit = byUrgency.find(([key, enabled]) => enabled && (key === null || config.strategies[key]?.leverage > 0));
+        if (!hit || hit[0] === null) return defaults;
+        const p = config.strategies[hit[0]];
+        return { name: hit[0], leverage: p.leverage, amount: p.amount > 0 ? p.amount : this.config.amount };
+    }
+
+    /**
      * ISOLATED margin + leverage set ahead on every tradable symbol, so the order path does not wait
      * on them and the loss of a trade is capped at its margin. Margin type cannot change once a
-     * position is open, so it must happen before the signal. Leverage = the highest strategy
-     * leverage, capped per symbol; the trade still sets its own profile's leverage after the order.
+     * position is open, so it must happen before the signal. Leverage = presetProfile()'s, capped per
+     * symbol; a trade on another profile sets its own leverage before its order.
      */
     async prepareMargin() {
         if (this.preparingMargin || !this.tradableSymbols) return;
         this.preparingMargin = true;
-        // Futures profiles only: a spot profile (Bybit) has no leverage and made this NaN, so every
-        // preset leverage call failed and symbols kept e.g. 50x (MITOUSDT 2026-10-21).
-        const profiles = Object.values(config.strategies).filter(p => p.leverage > 0);
-        const leverage = Math.max(this.config.leverage, ...profiles.map(p => p.leverage));
-        const amount = Math.max(this.config.amount, ...profiles.map(p => p.amount));
+        const { leverage, amount } = this.presetProfile();
         if (!(leverage > 0)) {
             console.error(`[MARGIN] invalid target leverage ${leverage}, nothing preset`);
             this.preparingMargin = false;
@@ -166,8 +186,11 @@ class LightningAutoTrader {
             // Current settings of every symbol in one call: only the ones that differ get a request.
             await this.binance.loadSymbolConfig().catch(error => console.warn(`[MARGIN] symbolConfig: ${error.response?.data?.msg || error.message}`));
             for (const symbol of this.tradableSymbols) {
-                // AUTO_TRADE_LEVERAGE_MAX: the symbol's own max (under AUTO_TRADE_LEVERAGE_CAP); else the
-                // highest strategy leverage, lowered where the symbol allows less.
+                // A position on another profile's leverage (e.g. a delist short at 15x) is left alone:
+                // this runs on every refresh, and lowering an open isolated position's leverage moves its margin.
+                if (this._symbolBusy(symbol)) continue;
+                // AUTO_TRADE_LEVERAGE_MAX: the symbol's own max (under AUTO_TRADE_LEVERAGE_CAP); else
+                // presetProfile()'s leverage, lowered where the symbol allows less.
                 const symbolLeverage = config.autoTrade.useSymbolMaxLeverage
                     ? (this.cappedMaxLeverage(symbol, this.config.amount / this.config.leverage) || leverage)
                     : Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);

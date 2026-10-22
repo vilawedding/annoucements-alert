@@ -583,6 +583,26 @@ test('trader longs Binance spot listings only, never futures launches / unknown 
     }
 });
 
+test('trader presets the leverage of the most latency-sensitive ENABLED strategy only', () => {
+    const trader = require('../../modules/automation/lightning-trader');
+    const keys = ['binanceListing', 'upbitListing', 'bithumbListing', 'upbitWarning', 'upbitDelisting', 'binanceDelisting', 'upbitListingShort'];
+    const real = Object.fromEntries(keys.map(k => [k, config.autoTrade[k]]));
+    const set = on => keys.forEach(k => { config.autoTrade[k] = on.includes(k); });
+    try {
+        // VPS 2026-10-22: Binance listing + delist on, Upbit profiles (x20) off -> the listing's leverage
+        set(['binanceListing', 'binanceDelisting']);
+        assert.strictEqual(trader.presetProfile().leverage, config.strategies.binanceListing.leverage);
+        set(['binanceDelisting', 'upbitListingShort']);
+        assert.strictEqual(trader.presetProfile().leverage, config.strategies.binanceDelisting.leverage, 'disabled profiles never count');
+        set(['upbitListing', 'binanceDelisting']);
+        assert.strictEqual(trader.presetProfile().leverage, config.autoTrade.leverage, 'Upbit listing LONG uses the default profile');
+        set([]);
+        assert.strictEqual(trader.presetProfile().leverage, config.autoTrade.leverage);
+    } finally {
+        keys.forEach(k => { config.autoTrade[k] = real[k]; });
+    }
+});
+
 test('upbit: release date is the ORIGINAL publication time (edits do not refresh it)', () => {
     resetStorage();
     upbit.seenKeys = new Set();
