@@ -22,6 +22,7 @@
     "check:binance-ws": "node scripts/tests/check-binance-announce-ws.js",
     "report:latency": "node scripts/report/source-latency-report.js",
     "probe:binance": "node scripts/tests/probe-binance-latency.js",
+    "probe:order": "node scripts/tests/probe-demo-order.js",
     "test:futures-delist": "node --require ./preload.js scripts/tests/test-futures-delist-plan.js",
     "listen:binance-ws": "node scripts/tests/listen-binance-announcements.js"
   },
