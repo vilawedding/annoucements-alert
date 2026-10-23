@@ -183,14 +183,14 @@ class LightningAutoTrader {
             this.preparingMargin = false;
             return;
         }
-        let done = 0, failed = 0;
+        let done = 0, failed = 0, ready = 0, busy = 0;
         try {
             // Current settings of every symbol in one call: only the ones that differ get a request.
             await this.binance.loadSymbolConfig().catch(error => console.warn(`[MARGIN] symbolConfig: ${error.response?.data?.msg || error.message}`));
             for (const symbol of this.tradableSymbols) {
                 // A position on another profile's leverage (e.g. a delist short at 15x) is left alone:
                 // this runs on every refresh, and lowering an open isolated position's leverage moves its margin.
-                if (this._symbolBusy(symbol)) continue;
+                if (this._symbolBusy(symbol)) { busy++; continue; }
                 // Listed in exchangeInfo but refused by the margin endpoints (-1121, 51 symbols on demo):
                 // asked once per run of the bot, not on every refresh.
                 if (this.marginInvalidSymbols.has(symbol)) continue;
@@ -200,7 +200,7 @@ class LightningAutoTrader {
                     ? (this.cappedMaxLeverage(symbol, this.config.amount / this.config.leverage) || leverage)
                     : Math.min(leverage, this.binance.getMaxLeverageCached(symbol, amount) || leverage);
                 const isolated = this.binance.isIsolatedCached(symbol);
-                if (isolated && this.binance.getLeverageCached(symbol) === symbolLeverage) continue;
+                if (isolated && this.binance.getLeverageCached(symbol) === symbolLeverage) { ready++; continue; }
                 try {
                     if (!isolated) await this.binance.ensureIsolated(symbol);
                     if (this.binance.getLeverageCached(symbol) !== symbolLeverage) await this.binance.changeInitialLeverage(symbol, symbolLeverage);
@@ -218,9 +218,10 @@ class LightningAutoTrader {
         } finally {
             this.preparingMargin = false;
         }
+        // "ready" = already ISOLATED at the target (no request); only the others are asked.
         const invalid = this.marginInvalidSymbols.size;
         if (done || failed || invalid !== this.marginInvalidLogged) {
-            console.log(`⚙️ [MARGIN] ISOLATED + leverage set on ${done} symbols (${failed} failed${invalid ? `, ${invalid} invalid symbols skipped` : ''})`);
+            console.log(`⚙️ [MARGIN] ${this.tradableSymbols.length} symbols, ISOLATED ${leverage}x (capped per symbol): ${ready} ready, ${done} set, ${failed} failed, ${invalid} invalid skipped, ${busy} with a position left alone`);
             this.marginInvalidLogged = invalid;
         }
     }
