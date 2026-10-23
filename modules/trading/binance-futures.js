@@ -77,18 +77,6 @@ function createSignature(queryString) {
     return crypto.createHmac('sha256', API_SECRET).update(queryString).digest('hex');
 }
 
-function buildQueryString(params) {
-    return Object.keys(params)
-        .filter(key => params[key] !== undefined && params[key] !== null)
-        .map(key => {
-            const value = params[key];
-            // Convert objects to JSON string (for takeProfit, stopLoss, etc)
-            const stringValue = typeof value === 'object' ? JSON.stringify(value) : value;
-            return `${key}=${stringValue}`;
-        })
-        .join('&');
-}
-
 function buildQueryStringForUrl(params) {
     return Object.keys(params)
         .filter(key => params[key] !== undefined && params[key] !== null)
@@ -122,9 +110,10 @@ async function makeRequest(method, endpoint, params = {}, requiresSignature = fa
             requestParams.recvWindow = 5000;
         }
         
-        // Signature must be calculated on non-URL-encoded string
-        const queryString = buildQueryString(requestParams);
-        requestParams.signature = createSignature(queryString);
+        // REST signs the query exactly as sent, i.e. percent-encoded: identical for ASCII, but a non-ASCII
+        // symbol (哈基米USDT, 币安人生USDT) signed raw is refused with -1022 (checked on demo 2026-10-23).
+        // The WS-API is the other way round: ws-order-client signs the raw values.
+        requestParams.signature = createSignature(buildQueryStringForUrl(requestParams));
     }
     
     const config = {

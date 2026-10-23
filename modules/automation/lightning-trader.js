@@ -35,6 +35,8 @@ class LightningAutoTrader {
         this.telegramQueue = [];
         // Symbols with an entry order on its way (not yet in the position manager)
         this.entriesInFlight = new Set();
+        // Symbols the margin endpoints answered "Invalid symbol" (prepareMargin stops asking)
+        this.marginInvalidSymbols = new Set();
         this.isSendingTelegram = false;
         this.fastModeSkipTradableCheck = process.env.AUTO_TRADE_FAST_SKIP_TRADABLE_CHECK !== 'false';
         this.marketFirstAsyncProtection = process.env.AUTO_TRADE_MARKET_FIRST_ASYNC_PROTECTION !== 'false';
@@ -189,6 +191,9 @@ class LightningAutoTrader {
                 // A position on another profile's leverage (e.g. a delist short at 15x) is left alone:
                 // this runs on every refresh, and lowering an open isolated position's leverage moves its margin.
                 if (this._symbolBusy(symbol)) continue;
+                // Listed in exchangeInfo but refused by the margin endpoints (-1121, 51 symbols on demo):
+                // asked once per run of the bot, not on every refresh.
+                if (this.marginInvalidSymbols.has(symbol)) continue;
                 // AUTO_TRADE_LEVERAGE_MAX: the symbol's own max (under AUTO_TRADE_LEVERAGE_CAP); else
                 // presetProfile()'s leverage, lowered where the symbol allows less.
                 const symbolLeverage = config.autoTrade.useSymbolMaxLeverage
@@ -201,6 +206,10 @@ class LightningAutoTrader {
                     if (this.binance.getLeverageCached(symbol) !== symbolLeverage) await this.binance.changeInitialLeverage(symbol, symbolLeverage);
                     done++;
                 } catch (error) {
+                    if (error.response?.data?.code === -1121) {
+                        this.marginInvalidSymbols.add(symbol);
+                        continue;
+                    }
                     failed++;
                     console.warn(`[MARGIN] ${symbol}: ${error.response?.data?.msg || error.message}`);
                 }
@@ -209,7 +218,11 @@ class LightningAutoTrader {
         } finally {
             this.preparingMargin = false;
         }
-        if (done || failed) console.log(`⚙️ [MARGIN] ISOLATED + leverage set on ${done} symbols (${failed} failed)`);
+        const invalid = this.marginInvalidSymbols.size;
+        if (done || failed || invalid !== this.marginInvalidLogged) {
+            console.log(`⚙️ [MARGIN] ISOLATED + leverage set on ${done} symbols (${failed} failed${invalid ? `, ${invalid} invalid symbols skipped` : ''})`);
+            this.marginInvalidLogged = invalid;
+        }
     }
 
     /**
