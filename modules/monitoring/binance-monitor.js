@@ -115,6 +115,8 @@ class BinanceMonitor {
      */
     delistScope(title) {
         const t = String(title || '');
+        // "Binance Alpha Will Remove X, Y (date)": alert only, never backtested.
+        if (/\bremove\b/i.test(t)) return 'OTHER';
         if (/futures|perpetual/i.test(t)) return 'FUTURES';
         if (/margin|loan/i.test(t)) return 'MARGIN';
         if (/\bwill delist\b/i.test(t) && !/alpha|convert|earn|copy trading|\bbots?\b/i.test(t)) return 'SPOT';
@@ -299,10 +301,13 @@ class BinanceMonitor {
 
         // "Binance Will Delist EPIC, QUICK on 2026-10-28": bare uppercase tickers after "Delist",
         // so the trade does not have to wait for the slow article page.
-        const delistList = title.match(/\bdelist\s+(.+?)\s+on\s+\d{4}-\d{2}-\d{2}/i);
+        // Same for "Binance Alpha Will Remove PTB, AA, SLX (SLIMEX) (2026-10-23)".
+        const delistList = title.match(/\bdelist\s+(.+?)\s+on\s+\d{4}-\d{2}-\d{2}/i)
+            || title.match(/\bremove\s+(.+?)\s*\(\d{4}-\d{2}-\d{2}\)/i);
         if (delistList) {
             for (const part of delistList[1].split(/\s*(?:,|&|\band\b)\s*/i)) {
-                if (/^[A-Z0-9]{2,10}$/.test(part.trim())) tokens.add(part.trim());
+                const ticker = part.replace(/\s*\(.*\)$/, '').trim();
+                if (/^[A-Z0-9]{2,10}$/.test(ticker)) tokens.add(ticker);
             }
         }
 
@@ -343,7 +348,7 @@ class BinanceMonitor {
         }
         
         if (catalogId === 161) {
-            if (lowerTitle.includes('delist') || lowerTitle.includes('removal')) {
+            if (lowerTitle.includes('delist') || lowerTitle.includes('removal') || /\bremove\b/.test(lowerTitle)) {
                 return 'DELISTING';
             }
             return 'DELISTING_RELATED';
