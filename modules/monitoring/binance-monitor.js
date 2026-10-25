@@ -338,7 +338,8 @@ class BinanceMonitor {
         const lowerTitle = title.toLowerCase();
         
         if (catalogId === 48) {
-            if (lowerTitle.includes('list') || lowerTitle.includes('listing')) {
+            // "Binance Futures Will Launch ... Perpetual Contract" has no "list": listingScope FUTURES, alert only.
+            if (lowerTitle.includes('list') || lowerTitle.includes('listing') || /\bwill launch\b/.test(lowerTitle)) {
                 return 'LISTING';
             }
             if (lowerTitle.includes('add') && lowerTitle.includes('pairs')) {
