@@ -19,6 +19,7 @@ const WS_RECONNECT_MIN_MS = 1000;
 const WS_RECONNECT_MAX_MS = 30000;
 const WS_ROTATE_MS = 23 * 3600e3;   // a connection lives 24h at most: reconnect before
 const WS_AUTH_RETRY_MS = 5 * 60000;
+const SKIP_LOG_MAX_AGE_MS = 10 * 60000;
 // Same wording as scripts/report/export-announcements.js (STOCKS)
 const TOKENIZED_STOCKS = /\bbstocks?\b|tokenized (securit|stock)|stock trading/i;
 
@@ -47,6 +48,18 @@ class BinanceMonitor {
         this.health = new MonitorHealth('BINANCE');
         this.wsHealth = new MonitorHealth('BINANCE-WS');
         this.wsConnected = false;
+        this.loggedSkips = new Set();
+    }
+
+    /**
+     * One log line per dropped notice (REST re-reads the same page every poll), only for recent ones so a
+     * restart does not log the whole page again: a silent drop hid "Alpha Will Remove" / "Futures Will Launch".
+     */
+    _logSkip(hash, reason, article) {
+        if (this.loggedSkips.has(hash)) return;
+        this.loggedSkips.add(hash);
+        if (Date.now() - Number(article.releaseDate) > SKIP_LOG_MAX_AGE_MS) return;
+        console.log(`⏭️ [BINANCE] not alerted (${reason}) [${article.catalogId}] ${article.title}`);
     }
 
     articleHash(article) {
@@ -367,11 +380,13 @@ class BinanceMonitor {
         
         const category = this.categorize(title, catalogId);
         if (!['LISTING', 'NEW_PAIRS', 'DELISTING'].includes(category)) {
+            this._logSkip(hash, category, article);
             return null;
         }
         // Tokenized stocks / ETFs ("... bStocks Trading Pairs on Binance Spot/Convert"): the tickers are
         // stocks, not alts with a perp to trade; neither alerted nor traded.
         if (TOKENIZED_STOCKS.test(title)) {
+            this._logSkip(hash, 'tokenized stocks', article);
             return null;
         }
 
@@ -405,6 +420,7 @@ class BinanceMonitor {
         const validTokens = this.filterValidTokens(tokens);
         // A pending delisting is still stored, so the page is not re-fetched on every poll.
         if (validTokens.length === 0 && !pendingDelistTokens) {
+            this._logSkip(hash, `${category}, no ticker`, article);
             return null;
         }
         
